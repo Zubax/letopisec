@@ -1,0 +1,57 @@
+# Byte-compiled and optimized Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.coverage
+.coverage.*
+hypothesis/
+
+# Type checkers and linters
+.pyre/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Packaging tools
+Pipfile
+Pipfile.lock
+poetry.lock
+poetry.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database files
+*.sqlite3
+*.sqlite3-journal
+*.db

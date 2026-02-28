@@ -40,6 +40,15 @@ ENV_LOG_MAX_BYTES = "LETOPISEC_LOG_MAX_BYTES"
 ENV_LOG_BACKUP_COUNT = "LETOPISEC_LOG_BACKUP_COUNT"
 
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_ANSI_RESET = "\x1b[0m"
+_ANSI_LEVEL_COLORS = {
+    "DEBUG": "\x1b[36m",
+    "INFO": "\x1b[32m",
+    "WARNING": "\x1b[33m",
+    "ERROR": "\x1b[31m",
+    "CRITICAL": "\x1b[1;31m",
+}
+_ANSI_LOGGER_COLOR = "\x1b[2;34m"
 
 
 def _utc_converter(timestamp: float | None = None) -> time.struct_time:
@@ -62,6 +71,27 @@ class ServeConfig:
 
 class _UTCFormatter(logging.Formatter):
     converter = staticmethod(_utc_converter)
+
+
+class _StderrColorFormatter(_UTCFormatter):
+    @staticmethod
+    def _wrap_with_ansi(text: str, ansi_prefix: str) -> str:
+        return f"{ansi_prefix}{text}{_ANSI_RESET}"
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        first_line, separator, tail = rendered.partition("\n")
+        parts = first_line.split(" | ")
+        if len(parts) < 5:
+            return rendered
+
+        level_ansi = _ANSI_LEVEL_COLORS.get(record.levelname, _ANSI_LEVEL_COLORS["INFO"])
+        parts[1] = self._wrap_with_ansi(parts[1], level_ansi)
+        parts[3] = self._wrap_with_ansi(parts[3], _ANSI_LOGGER_COLOR)
+        colorized_head = " | ".join(parts)
+        if not separator:
+            return colorized_head
+        return f"{colorized_head}{separator}{tail}"
 
 
 def _env_or_default(env: Mapping[str, str], key: str, default: str) -> str:
@@ -187,6 +217,16 @@ def _ensure_parent_directory(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _should_color_stderr(stream: object) -> bool:
+    isatty_method = getattr(stream, "isatty", None)
+    if not callable(isatty_method):
+        return False
+    try:
+        return bool(isatty_method())
+    except Exception:
+        return False
+
+
 def configure_logging(config: ServeConfig) -> None:
     level = logging._nameToLevel.get(config.log_level.upper())
     if not isinstance(level, int):
@@ -195,7 +235,7 @@ def configure_logging(config: ServeConfig) -> None:
     log_path = Path(config.log_file).expanduser()
     _ensure_parent_directory(log_path)
 
-    formatter = _UTCFormatter(
+    plain_formatter = _UTCFormatter(
         fmt="%(asctime)s.%(msecs)03d | %(levelname)-8s | %(process)7d | %(name)-32s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -210,7 +250,15 @@ def configure_logging(config: ServeConfig) -> None:
 
     stderr_handler = logging.StreamHandler()
     stderr_handler.setLevel(level)
-    stderr_handler.setFormatter(formatter)
+    if _should_color_stderr(stderr_handler.stream):
+        stderr_handler.setFormatter(
+            _StderrColorFormatter(
+                fmt="%(asctime)s.%(msecs)03d | %(levelname)-8s | %(process)7d | %(name)-32s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+    else:
+        stderr_handler.setFormatter(plain_formatter)
 
     file_handler = RotatingFileHandler(
         filename=str(log_path),
@@ -219,7 +267,7 @@ def configure_logging(config: ServeConfig) -> None:
         encoding="utf-8",
     )
     file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(plain_formatter)
 
     root_logger.setLevel(level)
     root_logger.addHandler(stderr_handler)
@@ -407,6 +455,101 @@ class _ServerTests(unittest.TestCase):
                 contents = log_file.read_text(encoding="utf-8")
                 self.assertIn("server logging smoke test", contents)
                 self.assertIn("| INFO", contents)
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            root_logger.setLevel(saved_level)
+            for handler in saved_handlers:
+                root_logger.addHandler(handler)
+
+    def test_should_color_stderr_uses_isatty_when_available(self) -> None:
+        class _FakeTTYStream:
+            def __init__(self, out: bool) -> None:
+                self._out = out
+
+            def isatty(self) -> bool:
+                return self._out
+
+        self.assertTrue(_should_color_stderr(_FakeTTYStream(True)))
+        self.assertFalse(_should_color_stderr(_FakeTTYStream(False)))
+        self.assertFalse(_should_color_stderr(object()))
+
+    def test_configure_logging_uses_color_formatter_for_tty_stderr(self) -> None:
+        root_logger = logging.getLogger()
+        saved_handlers = list(root_logger.handlers)
+        saved_level = root_logger.level
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_file = Path(temp_dir) / "logs" / "letopisec.log"
+                config = ServeConfig(log_file=str(log_file), log_level="INFO")
+                with patch("letopisec.server._should_color_stderr", return_value=True):
+                    configure_logging(config)
+
+                stream_handlers = [
+                    handler
+                    for handler in root_logger.handlers
+                    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler)
+                ]
+                self.assertEqual(1, len(stream_handlers))
+                formatter = stream_handlers[0].formatter
+                self.assertIsNotNone(formatter)
+                assert formatter is not None
+                self.assertIsInstance(formatter, _StderrColorFormatter)
+
+                record = logging.LogRecord(
+                    name="letopisec.server",
+                    level=logging.WARNING,
+                    pathname=__file__,
+                    lineno=0,
+                    msg="color formatter probe",
+                    args=(),
+                    exc_info=None,
+                )
+                rendered = formatter.format(record)
+                self.assertIn("\x1b[", rendered)
+                self.assertIn("WARNING", rendered)
+                self.assertIn("letopisec.server", rendered)
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            root_logger.setLevel(saved_level)
+            for handler in saved_handlers:
+                root_logger.addHandler(handler)
+
+    def test_configure_logging_stderr_and_file_remain_plain_when_color_disabled(self) -> None:
+        root_logger = logging.getLogger()
+        saved_handlers = list(root_logger.handlers)
+        saved_level = root_logger.level
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_file = Path(temp_dir) / "logs" / "letopisec.log"
+                config = ServeConfig(log_file=str(log_file), log_level="INFO")
+                with patch("letopisec.server._should_color_stderr", return_value=False):
+                    configure_logging(config)
+
+                stream_handlers = [
+                    handler
+                    for handler in root_logger.handlers
+                    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler)
+                ]
+                self.assertEqual(1, len(stream_handlers))
+                formatter = stream_handlers[0].formatter
+                self.assertIsNotNone(formatter)
+                assert formatter is not None
+                self.assertNotIsInstance(formatter, _StderrColorFormatter)
+
+                LOGGER.info("plain formatter probe")
+                for handler in root_logger.handlers:
+                    handler.flush()
+
+                self.assertTrue(log_file.exists())
+                contents = log_file.read_text(encoding="utf-8")
+                self.assertIn("plain formatter probe", contents)
+                self.assertNotIn("\x1b[", contents)
         finally:
             for handler in list(root_logger.handlers):
                 root_logger.removeHandler(handler)

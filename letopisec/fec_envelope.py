@@ -17,6 +17,7 @@ Pavel Kirienko <pavel.kirienko@zubax.com>
 from __future__ import annotations
 
 import binascii
+import logging
 import os
 import random
 import unittest
@@ -33,6 +34,7 @@ PRIM_POLY = 0x11D
 STRIDE = 29
 
 __all__ = ["UnboxError", "box", "unbox", "USER_DATA_BYTES", "RECORD_BYTES"]
+LOGGER = logging.getLogger(__name__)
 
 
 class UnboxError(Enum):
@@ -76,8 +78,17 @@ def unbox(record: bytes) -> bytes | UnboxError:
         return UnboxError.BAD_HEADER_BYTE
 
     codeword = _deinterleave_255(record[1:])
-    if not _rs_decode(codeword):
+    rs_ok, corrected_positions = _rs_decode(codeword)
+    if not rs_ok:
         return UnboxError.RS_DECODE_FAILED
+    if corrected_positions:
+        corrected_record_positions = tuple(1 + ((pos * STRIDE) % 255) for pos in corrected_positions)
+        LOGGER.info(
+            "FEC decode corrected %d byte(s); codeword positions=%s; record positions=%s",
+            len(corrected_positions),
+            corrected_positions,
+            corrected_record_positions,
+        )
 
     user = bytes(codeword[:USER_DATA_BYTES])
     stored_crc = int.from_bytes(codeword[USER_DATA_BYTES : USER_DATA_BYTES + 4], "little")
@@ -276,24 +287,26 @@ def _rs_correct(
     return True
 
 
-def _rs_decode(codeword: bytearray) -> bool:
+def _rs_decode(codeword: bytearray) -> tuple[bool, tuple[int, ...]]:
     syndromes, any_error = _rs_syndromes(codeword)
     if not any_error:
-        return True
+        return True, ()
 
     sigma, l = _berlekamp_massey(syndromes)
     if l <= 0 or l > PARITY_BYTES:
-        return False
+        return False, ()
 
     positions = _chien_search(sigma, l)
     if len(positions) != l:
-        return False
+        return False, ()
 
     if not _rs_correct(codeword, syndromes, sigma, l, positions):
-        return False
+        return False, ()
 
     verify, any_left = _rs_syndromes(codeword)
-    return not any_left and all(v == 0 for v in verify)
+    if any_left or not all(v == 0 for v in verify):
+        return False, ()
+    return True, tuple(sorted(positions))
 
 
 def _modinv_255(a: int) -> int:
@@ -372,6 +385,28 @@ class _FECEnvelopeTests(unittest.TestCase):
         record[0] ^= 0xFF
         result = unbox(bytes(record))
         self.assertEqual(UnboxError.BAD_HEADER_BYTE, result)
+
+    def test_info_log_contains_corrected_positions(self) -> None:
+        record = bytearray(box(b"hello"))
+        record_pos = 123
+        record[record_pos] ^= 0xA5
+        expected_codeword_pos = ((record_pos - 1) * STRIDE_INV) % 255
+
+        with self.assertLogs(__name__, level="INFO") as cm:
+            result = unbox(bytes(record))
+
+        self.assertIsInstance(result, bytes)
+        expected = (
+            "FEC decode corrected 1 byte(s); "
+            f"codeword positions=({expected_codeword_pos},); "
+            f"record positions=({record_pos},)"
+        )
+        self.assertTrue(any(expected in message for message in cm.output))
+
+    def test_clean_record_emits_no_damage_info_log(self) -> None:
+        with self.assertNoLogs(__name__, level="INFO"):
+            result = unbox(box(b"hello"))
+        self.assertIsInstance(result, bytes)
 
     def test_crc_mismatch_or_rs_failure_beyond_budget(self) -> None:
         rng = random.Random(42)

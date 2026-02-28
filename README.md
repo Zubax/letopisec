@@ -45,7 +45,14 @@ export LETOPISEC_LOG_LEVEL=INFO
 uvicorn --factory letopisec.server:create_app_from_env
 ```
 
-## Manual interrogation
+## API endpoints
+
+- `POST /cf3d/api/v1/commit` - Upload one or more binary CF3D records; the first HTTP response line is the cumulative ACK (`last_seqno`).
+- `GET /cf3d/api/v1/devices` - List known devices with their latest heartbeat time (`last_heard_ts`) and last seen hardware UID (`last_uid`).
+- `GET /cf3d/api/v1/boots` - List boot sessions for a device, including first/last record per boot, with optional commit-time window filtering.
+- `GET /cf3d/api/v1/records` - Fetch records for a device and one or more boot IDs, with optional seqno bounds and long-polling for real-time streaming.
+
+### Manual invocation
 
 The REST API is very simple and can be exercised manually using wget or similar tools. Examples (`jq` is added for nicer formatting):
 

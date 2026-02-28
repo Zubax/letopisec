@@ -51,10 +51,16 @@ class CANFrameDTO(BaseModel):
 
 
 class CANFrameRecordDTO(BaseModel):
-    hw_ts_us: int = Field(description="Microseconds from device boot at frame capture")
-    boot_id: int = Field(description="Device boot identifier")
-    seqno: int = Field(description="Monotonic frame sequence number")
-    commit_ts: int = Field(description="Unix timestamp when this record was committed")
+    hw_ts_us: int = Field(
+        description="Monotonic hardware timestamp in microseconds since this boot; sampled at frame capture time"
+    )
+    boot_id: int = Field(description="Identifier of the device boot session where this frame was captured")
+    seqno: int = Field(
+        description="Device-wide monotonic frame sequence number used for ordering, deduplication, and pagination"
+    )
+    commit_ts: int = Field(
+        description="Server-side Unix timestamp (seconds) when this record was committed to the database"
+    )
     frame: CANFrameDTO
 
 

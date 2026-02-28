@@ -47,7 +47,7 @@ def _wait_for_readiness(*, port: int, process: subprocess.Popen[str], timeout_s:
             raise RuntimeError(f"server process exited before readiness: return_code={process.returncode}")
         try:
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
-            connection.request("GET", "/cf3d/api/v1/device-tags")
+            connection.request("GET", "/cf3d/api/v1/devices")
             response = connection.getresponse()
             response.read()
             connection.close()

@@ -7,7 +7,7 @@ The uploader streams one or more .cf3d files in fixed-size chunks to:
 
 Behavior summary:
   - Files are processed in deterministic lexicographic order.
-  - Each chunk is POSTed with device metadata (device_uid, device_tag).
+  - Each chunk is POSTed with device metadata (device_uid, device).
   - Transient failures are retried with exponential backoff.
   - A verbose final ingest report is always emitted.
 
@@ -112,11 +112,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--server", required=True, help="Base server URL, e.g., http://192.168.1.123")
     parser.add_argument("--device_uid", required=True, type=_parse_device_uid, help="Integer literal (auto-radix)")
-    parser.add_argument("--device_tag", required=True, help="Opaque non-empty device tag")
+    parser.add_argument("--device", required=True, help="Opaque non-empty device identifier")
     parser.add_argument("files", nargs="+", help="One or more CF3D log files")
     args = parser.parse_args(argv)
-    if not args.device_tag:
-        parser.error("device_tag must be non-empty")
+    if not args.device:
+        parser.error("device must be non-empty")
     return args
 
 
@@ -180,21 +180,21 @@ def _post_chunk(
     *,
     commit_url: str,
     device_uid: int,
-    device_tag: str,
+    device: str,
     payload: bytes,
 ) -> CommitResponse:
-    params = urllib.parse.urlencode({"device_uid": str(device_uid), "device_tag": device_tag})
+    params = urllib.parse.urlencode({"device_uid": str(device_uid), "device": device})
     url = f"{commit_url}?{params}"
     request = urllib.request.Request(url=url, data=payload, method="POST")
     request.add_header("Content-Type", "application/octet-stream")
     request.add_header("Accept", "text/plain")
 
     LOGGER.debug(
-        "Sending commit request: url=%s payload_bytes=%d device_uid=%d device_tag=%r",
+        "Sending commit request: url=%s payload_bytes=%d device_uid=%d device=%r",
         url,
         len(payload),
         device_uid,
-        device_tag,
+        device,
     )
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
@@ -232,7 +232,7 @@ def _upload_with_retries(
     *,
     commit_url: str,
     device_uid: int,
-    device_tag: str,
+    device: str,
     payload: bytes,
     file_path: Path,
     chunk_index: int,
@@ -257,7 +257,7 @@ def _upload_with_retries(
             response = _post_chunk(
                 commit_url=commit_url,
                 device_uid=device_uid,
-                device_tag=device_tag,
+                device=device,
                 payload=payload,
             )
             duration = time.monotonic() - attempt_started
@@ -375,10 +375,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     current_chunk_size = 0
 
     LOGGER.info(
-        "Starting ingest: server=%s device_uid=%d device_tag=%r files=%d chunk_bytes=%d",
+        "Starting ingest: server=%s device_uid=%d device=%r files=%d chunk_bytes=%d",
         args.server,
         args.device_uid,
-        args.device_tag,
+        args.device,
         len(files),
         CHUNK_BYTES,
     )
@@ -419,7 +419,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                     response = _upload_with_retries(
                         commit_url=commit_url,
                         device_uid=args.device_uid,
-                        device_tag=args.device_tag,
+                        device=args.device,
                         payload=payload,
                         file_path=path,
                         chunk_index=chunk_index,

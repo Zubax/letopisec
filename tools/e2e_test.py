@@ -32,7 +32,7 @@ LOGGER = logging.getLogger("letopisec_e2e")
 DEFAULT_DATASET_PATH = Path("data") / "0000000.cf3d"
 DEFAULT_INGEST_SCRIPT_PATH = Path("tools") / "letopisec_ingest.py"
 DEFAULT_DEVICE_UID = "0x123"
-DEFAULT_DEVICE_TAG = "e2e-dataset"
+DEFAULT_DEVICE = "e2e-dataset"
 DEFAULT_READINESS_TIMEOUT_S = 30.0
 
 
@@ -55,7 +55,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to ingest script (tools/letopisec_ingest.py)",
     )
     parser.add_argument("--device-uid", default=DEFAULT_DEVICE_UID, help="Device UID string passed to ingest script")
-    parser.add_argument("--device-tag", default=DEFAULT_DEVICE_TAG, help="Device tag passed to ingest script")
+    parser.add_argument("--device", default=DEFAULT_DEVICE, help="Device identifier passed to ingest script")
     parser.add_argument(
         "--readiness-timeout-s",
         type=float,
@@ -77,7 +77,7 @@ def _wait_for_server_ready(base_url: str, server_process: subprocess.Popen[bytes
     # 1) Avoid racing ingest against server startup.
     # 2) Detect "server died on startup" early and report its exit code.
     deadline = time.monotonic() + timeout_s
-    probe_url = f"{base_url}/cf3d/api/v1/device-tags"
+    probe_url = f"{base_url}/cf3d/api/v1/devices"
     last_error: Exception | None = None
     LOGGER.debug("Waiting for server readiness: url=%s timeout_s=%.1f", probe_url, timeout_s)
     while time.monotonic() < deadline:
@@ -131,7 +131,7 @@ def _run_ingest(
     ingest_script_path: Path,
     base_url: str,
     device_uid: str,
-    device_tag: str,
+    device: str,
     dataset_path: Path,
 ) -> None:
     # Use the current interpreter explicitly so the ingest tool uses the same virtualenv
@@ -143,8 +143,8 @@ def _run_ingest(
         base_url,
         "--device_uid",
         device_uid,
-        "--device_tag",
-        device_tag,
+        "--device",
+        device,
         str(dataset_path),
     ]
     LOGGER.info("Starting ingest command: %s", command)
@@ -160,7 +160,7 @@ def run(argv: list[str] | None = None) -> int:
     ingest_script_path = Path(args.ingest_script)
     readiness_timeout_s = float(args.readiness_timeout_s)
     device_uid = str(args.device_uid)
-    device_tag = str(args.device_tag)
+    device = str(args.device)
 
     # Preflight checks keep failures deterministic and immediately understandable.
     if not dataset_path.exists():
@@ -182,12 +182,12 @@ def run(argv: list[str] | None = None) -> int:
         return 1
 
     LOGGER.info(
-        "Starting E2E test: dataset=%s expected_records=%d ingest_script=%s device_uid=%s device_tag=%r",
+        "Starting E2E test: dataset=%s expected_records=%d ingest_script=%s device_uid=%s device=%r",
         dataset_path,
         expected_records,
         ingest_script_path,
         device_uid,
-        device_tag,
+        device,
     )
 
     with tempfile.TemporaryDirectory(prefix="letopisec-e2e-") as temp_dir:
@@ -240,26 +240,27 @@ def run(argv: list[str] | None = None) -> int:
                     ingest_script_path=ingest_script_path,
                     base_url=base_url,
                     device_uid=device_uid,
-                    device_tag=device_tag,
+                    device=device,
                     dataset_path=dataset_path,
                 )
 
-                # First retrieval check: the uploaded device tag must become query-visible.
-                tags_body = _http_get_json(f"{base_url}/cf3d/api/v1/device-tags")
-                tags = list(tags_body.get("device_tags", []))
-                if device_tag not in tags:
-                    raise AssertionError(f"uploaded device tag not found in /device-tags: tags={tags!r}")
+                # First retrieval check: the uploaded device must become query-visible.
+                devices_body = _http_get_json(f"{base_url}/cf3d/api/v1/devices")
+                devices = list(devices_body.get("devices", []))
+                known_devices = [str(entry.get("device")) for entry in devices if isinstance(entry, dict)]
+                if device not in known_devices:
+                    raise AssertionError(f"uploaded device not found in /devices: devices={devices!r}")
 
-                # Second retrieval check: at least one boot must be discoverable for this tag.
-                boots_body = _http_get_json(f"{base_url}/cf3d/api/v1/boots?{urlencode({'device_tag': device_tag})}")
+                # Second retrieval check: at least one boot must be discoverable for this device.
+                boots_body = _http_get_json(f"{base_url}/cf3d/api/v1/boots?{urlencode({'device': device})}")
                 boot_entries = list(boots_body.get("boots", []))
                 if not boot_entries:
-                    raise AssertionError(f"no boots returned for {device_tag!r}")
+                    raise AssertionError(f"no boots returned for {device!r}")
                 boot_ids = sorted(int(entry["boot_id"]) for entry in boot_entries)
 
                 # Third retrieval check: fetch records for all discovered boots and validate
                 # cardinality + latest seqno against dataset-derived expectations.
-                query_items: list[tuple[str, str]] = [("device_tag", device_tag), ("limit", "10000")]
+                query_items: list[tuple[str, str]] = [("device", device), ("limit", "10000")]
                 query_items.extend(("boot_id", str(boot_id)) for boot_id in boot_ids)
                 records_body = _http_get_json(f"{base_url}/cf3d/api/v1/records?{urlencode(query_items, doseq=True)}")
                 total_matched = int(records_body.get("total_matched", -1))

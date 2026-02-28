@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from letopisec.database import Boot, Database, SqliteDatabase
+from letopisec.database import Boot, Database, DeviceInfo, SqliteDatabase
 from letopisec.fec_envelope import RECORD_BYTES, USER_DATA_BYTES, UnboxError, box, unbox
 from letopisec.model import CANFrame, CANFrameRecord
 
@@ -53,12 +53,18 @@ class BootDTO(BaseModel):
     last_record: CANFrameRecordDTO
 
 
-class DeviceTagsResponse(BaseModel):
-    device_tags: list[str]
+class DeviceDTO(BaseModel):
+    device: str
+    last_heard_ts: int
+    last_uid: int
+
+
+class DevicesResponse(BaseModel):
+    devices: list[DeviceDTO]
 
 
 class BootsResponse(BaseModel):
-    device_tag: str
+    device: str
     boots: list[BootDTO]
 
 
@@ -71,7 +77,7 @@ class RecordsFilterEcho(BaseModel):
 
 
 class RecordsResponse(BaseModel):
-    device_tag: str
+    device: str
     filters: RecordsFilterEcho
     total_matched: int
     latest_seqno_seen: int | None
@@ -98,6 +104,10 @@ def _serialize_boot(boot: Boot) -> BootDTO:
         first_record=_serialize_record(boot.first_record),
         last_record=_serialize_record(boot.last_record),
     )
+
+
+def _serialize_device_info(device: DeviceInfo) -> DeviceDTO:
+    return DeviceDTO(device=device.device, last_heard_ts=device.last_heard_ts, last_uid=device.last_uid)
 
 
 def _parse_device_uid(
@@ -130,6 +140,7 @@ def get_database(request: Request) -> Database:
     summary="Commit CAN frame records",
     description=(
         "Upload one or more binary Reed-Solomon-wrapped CF3D records. "
+        "Query parameter 'device' is canonical; deprecated alias 'device_tag' is accepted on this endpoint only. "
         "Successful responses return cumulative ACK (last known seqno) as the first text line."
     ),
     responses={
@@ -148,27 +159,55 @@ def get_database(request: Request) -> Database:
 async def commit(
     request: Request,
     device_uid: Annotated[int, Depends(_parse_device_uid)],
-    device_tag: Annotated[str, Query(min_length=1, description="Opaque device tag")],
     database: Annotated[Database, Depends(get_database)],
+    device: Annotated[str | None, Query(min_length=1, description="Opaque device identifier")] = None,
+    device_tag: Annotated[
+        str | None,
+        Query(min_length=1, description="DEPRECATED: use 'device'. Supported only on /commit."),
+    ] = None,
 ) -> PlainTextResponse:
     """
     Commit endpoint for CF3D devices.
     """
+    if device is None and device_tag is None:
+        LOGGER.warning("Commit request rejected: both 'device' and deprecated 'device_tag' are missing")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="either 'device' or deprecated 'device_tag' query parameter is required",
+        )
+
+    resolved_device = device if device is not None else device_tag
+    assert resolved_device is not None
+    if device is None and device_tag is not None:
+        LOGGER.warning(
+            "Commit request is using deprecated query parameter 'device_tag': device_uid=%d device_tag=%r",
+            device_uid,
+            device_tag,
+        )
+    elif device is not None and device_tag is not None and device != device_tag:
+        LOGGER.warning(
+            "Commit request has conflicting device identifiers; preferring 'device' over deprecated 'device_tag': "
+            "device_uid=%d device=%r device_tag=%r",
+            device_uid,
+            device,
+            device_tag,
+        )
+
     payload = await request.body()
     full_records, trailing_bytes = divmod(len(payload), RECORD_BYTES)
     LOGGER.debug(
-        "Commit request received: device_uid=%d device_tag=%r payload_bytes=%d full_records=%d trailing_bytes=%d",
+        "Commit request received: device_uid=%d device=%r payload_bytes=%d full_records=%d trailing_bytes=%d",
         device_uid,
-        device_tag,
+        resolved_device,
         len(payload),
         full_records,
         trailing_bytes,
     )
     if trailing_bytes:
         LOGGER.warning(
-            "Commit payload has trailing bytes that will be ignored: device_uid=%d device_tag=%r trailing_bytes=%d",
+            "Commit payload has trailing bytes that will be ignored: device_uid=%d device=%r trailing_bytes=%d",
             device_uid,
-            device_tag,
+            resolved_device,
             trailing_bytes,
         )
 
@@ -182,9 +221,9 @@ async def commit(
         if isinstance(unboxed, UnboxError):
             decode_failures += 1
             LOGGER.error(
-                "Commit record decode failed: device_uid=%d device_tag=%r index=%d error=%s",
+                "Commit record decode failed: device_uid=%d device=%r index=%d error=%s",
                 device_uid,
-                device_tag,
+                resolved_device,
                 index,
                 unboxed.name,
             )
@@ -194,18 +233,18 @@ async def commit(
         if record is None:
             parse_failures += 1
             LOGGER.error(
-                "Commit record parse failed after decode: device_uid=%d device_tag=%r index=%d",
+                "Commit record parse failed after decode: device_uid=%d device=%r index=%d",
                 device_uid,
-                device_tag,
+                resolved_device,
                 index,
             )
             continue
 
         accepted_records.append(record)
         LOGGER.debug(
-            "Commit record accepted: device_uid=%d device_tag=%r index=%d seqno=%d boot_id=%d can_id=%d data_len=%d",
+            "Commit record accepted: device_uid=%d device=%r index=%d seqno=%d boot_id=%d can_id=%d data_len=%d",
             device_uid,
-            device_tag,
+            resolved_device,
             index,
             record.seqno,
             record.boot_id,
@@ -214,12 +253,12 @@ async def commit(
         )
 
     try:
-        last_seqno = database.commit(device_uid=device_uid, device_tag=device_tag, records=accepted_records)
+        last_seqno = database.commit(device_uid=device_uid, device=resolved_device, records=accepted_records)
     except Exception:
         LOGGER.critical(
-            "Unexpected commit exception: device_uid=%d device_tag=%r",
+            "Unexpected commit exception: device_uid=%d device=%r",
             device_uid,
-            device_tag,
+            resolved_device,
             exc_info=True,
         )
         raise HTTPException(
@@ -236,10 +275,10 @@ async def commit(
         )
 
     LOGGER.info(
-        "Commit request processed: device_uid=%d device_tag=%r status_code=%d last_seqno=%d "
+        "Commit request processed: device_uid=%d device=%r status_code=%d last_seqno=%d "
         "accepted=%d failed_decode=%d failed_parse=%d full_records=%d trailing_bytes=%d",
         device_uid,
-        device_tag,
+        resolved_device,
         response_status,
         last_seqno,
         len(accepted_records),
@@ -252,39 +291,48 @@ async def commit(
 
 
 @router.get(
-    "/cf3d/api/v1/device-tags",
-    response_model=DeviceTagsResponse,
+    "/cf3d/api/v1/devices",
+    response_model=DevicesResponse,
     tags=["query"],
-    summary="List known device tags",
-    description="Returns all known device tags currently present in the database.",
+    summary="List known devices",
+    description="Returns all known devices currently present in the database.",
     responses={
         200: {
             "description": "Successful response",
-            "content": {"application/json": {"example": {"device_tags": ["alpha", "beta"]}}},
+            "content": {
+                "application/json": {
+                    "example": {
+                        "devices": [
+                            {"device": "alpha", "last_heard_ts": 1704067200, "last_uid": 123},
+                            {"device": "beta", "last_heard_ts": 1704067201, "last_uid": 456},
+                        ]
+                    }
+                }
+            },
         },
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
 )
-def get_device_tags(
+def get_devices(
     database: Annotated[Database, Depends(get_database)],
-) -> DeviceTagsResponse:
+) -> DevicesResponse:
     try:
-        tags = list(database.get_device_tags())
+        devices = [_serialize_device_info(item) for item in database.get_devices()]
     except Exception:
-        LOGGER.critical("Unexpected exception while listing device tags", exc_info=True)
+        LOGGER.critical("Unexpected exception while listing devices", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal server error")
 
-    LOGGER.info("Device tags query completed: count=%d", len(tags))
-    return DeviceTagsResponse(device_tags=tags)
+    LOGGER.info("Devices query completed: count=%d", len(devices))
+    return DevicesResponse(devices=devices)
 
 
 @router.get(
     "/cf3d/api/v1/boots",
     response_model=BootsResponse,
     tags=["query"],
-    summary="Query boot ranges for a device tag",
+    summary="Query boot ranges for a device",
     description=(
-        "Returns boot ranges for the specified device tag. "
+        "Returns boot ranges for the specified device. "
         "Commit timestamps are filtered using overlap semantics between earliest/latest bounds and boot commit span."
     ),
     responses={
@@ -293,7 +341,7 @@ def get_device_tags(
             "content": {
                 "application/json": {
                     "example": {
-                        "device_tag": "alpha",
+                        "device": "alpha",
                         "boots": [
                             {
                                 "boot_id": 100,
@@ -320,23 +368,23 @@ def get_device_tags(
     },
 )
 def get_boots(
-    device_tag: Annotated[str, Query(min_length=1, description="Device tag")],
+    device: Annotated[str, Query(min_length=1, description="Device identifier")],
     earliest_commit: Annotated[datetime | None, Query(description="Lower commit-time bound (ISO-8601)")] = None,
     latest_commit: Annotated[datetime | None, Query(description="Upper commit-time bound (ISO-8601)")] = None,
     database: Database = Depends(get_database),
 ) -> BootsResponse:
     LOGGER.debug(
-        "Boots query request: device_tag=%r earliest_commit=%r latest_commit=%r",
-        device_tag,
+        "Boots query request: device=%r earliest_commit=%r latest_commit=%r",
+        device,
         earliest_commit,
         latest_commit,
     )
     try:
-        boots = list(database.get_boots(device_tag, earliest_commit, latest_commit))
+        boots = list(database.get_boots(device, earliest_commit, latest_commit))
     except Exception:
         LOGGER.critical(
-            "Unexpected exception while querying boots: device_tag=%r earliest_commit=%r latest_commit=%r",
-            device_tag,
+            "Unexpected exception while querying boots: device=%r earliest_commit=%r latest_commit=%r",
+            device,
             earliest_commit,
             latest_commit,
             exc_info=True,
@@ -346,32 +394,30 @@ def get_boots(
     serialized = [_serialize_boot(boot) for boot in boots]
     if not serialized:
         LOGGER.warning(
-            "Boots query returned no results: device_tag=%r earliest_commit=%r latest_commit=%r",
-            device_tag,
+            "Boots query returned no results: device=%r earliest_commit=%r latest_commit=%r",
+            device,
             earliest_commit,
             latest_commit,
         )
     else:
         LOGGER.info(
-            "Boots query completed: device_tag=%r result_count=%d earliest_commit=%r latest_commit=%r",
-            device_tag,
+            "Boots query completed: device=%r result_count=%d earliest_commit=%r latest_commit=%r",
+            device,
             len(serialized),
             earliest_commit,
             latest_commit,
         )
-    return BootsResponse(device_tag=device_tag, boots=serialized)
+    return BootsResponse(device=device, boots=serialized)
 
 
 def _query_records_once(
     database: Database,
-    device_tag: str,
+    device: str,
     boot_ids: list[int],
     seqno_min: int | None,
     seqno_max: int | None,
 ) -> tuple[list[CANFrameRecord], int | None]:
-    records = list(
-        database.get_records(device_tag=device_tag, boot_ids=boot_ids, seqno_min=seqno_min, seqno_max=seqno_max)
-    )
+    records = list(database.get_records(device=device, boot_ids=boot_ids, seqno_min=seqno_min, seqno_max=seqno_max))
     records.sort(key=lambda record: record.seqno)
     latest_seqno_seen = records[-1].seqno if records else None
     return records, latest_seqno_seen
@@ -383,7 +429,7 @@ def _query_records_once(
     tags=["query"],
     summary="Query CAN records",
     description=(
-        "Returns records for specified device tag and boot IDs. "
+        "Returns records for specified device and boot IDs. "
         "Optional long polling is enabled via wait_timeout_s. "
         "For lossless pagination, set seqno_min to last returned record seqno + 1. "
         "For catch-up behavior that may skip unseen records from truncated pages, "
@@ -395,7 +441,7 @@ def _query_records_once(
             "content": {
                 "application/json": {
                     "example": {
-                        "device_tag": "alpha",
+                        "device": "alpha",
                         "filters": {
                             "boot_ids": [1],
                             "seqno_min": 10,
@@ -423,7 +469,7 @@ def _query_records_once(
     },
 )
 async def get_records(
-    device_tag: Annotated[str, Query(min_length=1, description="Device tag")],
+    device: Annotated[str, Query(min_length=1, description="Device identifier")],
     boot_id: Annotated[list[int], Query(min_length=1, description="Repeated boot_id parameter")],
     seqno_min: Annotated[int | None, Query(description="Inclusive minimum sequence number")] = None,
     seqno_max: Annotated[int | None, Query(description="Inclusive maximum sequence number")] = None,
@@ -443,8 +489,8 @@ async def get_records(
         limit=limit,
     )
     LOGGER.debug(
-        "Records query request: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r wait_timeout_s=%d limit=%d",
-        device_tag,
+        "Records query request: device=%r boot_ids=%s seqno_min=%r seqno_max=%r wait_timeout_s=%d limit=%d",
+        device,
         boot_ids,
         seqno_min,
         seqno_max,
@@ -454,13 +500,13 @@ async def get_records(
 
     if seqno_max is not None and seqno_min is not None and seqno_min > seqno_max:
         LOGGER.warning(
-            "Records query has invalid effective range; returning empty: device_tag=%r seqno_min=%d seqno_max=%d",
-            device_tag,
+            "Records query has invalid effective range; returning empty: device=%r seqno_min=%d seqno_max=%d",
+            device,
             seqno_min,
             seqno_max,
         )
         return RecordsResponse(
-            device_tag=device_tag,
+            device=device,
             filters=filters,
             total_matched=0,
             latest_seqno_seen=None,
@@ -477,15 +523,15 @@ async def get_records(
             poll_count += 1
             matching_records, latest_seqno_seen = _query_records_once(
                 database=database,
-                device_tag=device_tag,
+                device=device,
                 boot_ids=boot_ids,
                 seqno_min=seqno_min,
                 seqno_max=seqno_max,
             )
             total_matched = len(matching_records)
             LOGGER.debug(
-                "Records query poll result: device_tag=%r poll_count=%d total_matched=%d latest_seqno_seen=%r",
-                device_tag,
+                "Records query poll result: device=%r poll_count=%d total_matched=%d latest_seqno_seen=%r",
+                device,
                 poll_count,
                 total_matched,
                 latest_seqno_seen,
@@ -495,14 +541,14 @@ async def get_records(
                 paged_records = matching_records[:limit]
                 serialized = [_serialize_record(record) for record in paged_records]
                 LOGGER.info(
-                    "Records query completed with data: device_tag=%r poll_count=%d total_matched=%d returned=%d",
-                    device_tag,
+                    "Records query completed with data: device=%r poll_count=%d total_matched=%d returned=%d",
+                    device,
                     poll_count,
                     total_matched,
                     len(serialized),
                 )
                 return RecordsResponse(
-                    device_tag=device_tag,
+                    device=device,
                     filters=filters,
                     total_matched=total_matched,
                     latest_seqno_seen=latest_seqno_seen,
@@ -515,19 +561,19 @@ async def get_records(
                 timed_out = wait_timeout_s > 0
                 if timed_out:
                     LOGGER.warning(
-                        "Records query timed out with no matching records: device_tag=%r wait_timeout_s=%d polls=%d",
-                        device_tag,
+                        "Records query timed out with no matching records: device=%r wait_timeout_s=%d polls=%d",
+                        device,
                         wait_timeout_s,
                         poll_count,
                     )
                 else:
                     LOGGER.info(
-                        "Records query completed with empty snapshot: device_tag=%r poll_count=%d",
-                        device_tag,
+                        "Records query completed with empty snapshot: device=%r poll_count=%d",
+                        device,
                         poll_count,
                     )
                 return RecordsResponse(
-                    device_tag=device_tag,
+                    device=device,
                     filters=filters,
                     total_matched=0,
                     latest_seqno_seen=latest_seqno_seen,
@@ -537,16 +583,16 @@ async def get_records(
 
             sleep_duration = min(WAIT_POLL_INTERVAL_S, deadline - now)
             LOGGER.debug(
-                "Records query waiting for new records: device_tag=%r sleep_duration=%.3f poll_count=%d",
-                device_tag,
+                "Records query waiting for new records: device=%r sleep_duration=%.3f poll_count=%d",
+                device,
                 sleep_duration,
                 poll_count,
             )
             await asyncio.sleep(sleep_duration)
     except Exception:
         LOGGER.critical(
-            "Unexpected exception while querying records: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r",
-            device_tag,
+            "Unexpected exception while querying records: device=%r boot_ids=%s seqno_min=%r seqno_max=%r",
+            device,
             boot_ids,
             seqno_min,
             seqno_max,
@@ -647,48 +693,48 @@ class _FakeDatabase(Database):
     def __init__(self, ack_seqno: int = 0) -> None:
         self._ack_seqno = ack_seqno
         self.commits: list[tuple[int, str, list[CANFrameRecord]]] = []
-        self.device_tags: list[str] = []
-        self.boots_by_tag: dict[str, list[Boot]] = {}
-        self.records_by_tag: dict[str, list[CANFrameRecord]] = {}
-        self.records_script_by_tag: dict[str, list[list[CANFrameRecord]]] = {}
+        self.devices: list[DeviceInfo] = []
+        self.boots_by_device: dict[str, list[Boot]] = {}
+        self.records_by_device: dict[str, list[CANFrameRecord]] = {}
+        self.records_script_by_device: dict[str, list[list[CANFrameRecord]]] = {}
         self.fail_methods: set[str] = set()
         self.last_get_boots_args: tuple[str, datetime | None, datetime | None] | None = None
         self.last_get_records_args: tuple[str, list[int], int | None, int | None] | None = None
         self.get_records_call_count = 0
 
-    def commit(self, device_uid: int, device_tag: str, records: Sequence[CANFrameRecord]) -> int:
+    def commit(self, device_uid: int, device: str, records: Sequence[CANFrameRecord]) -> int:
         if "commit" in self.fail_methods:
             raise RuntimeError("forced commit failure")
-        self.commits.append((device_uid, device_tag, list(records)))
+        self.commits.append((device_uid, device, list(records)))
         return self._ack_seqno
 
-    def get_device_tags(self) -> Iterable[str]:
-        if "get_device_tags" in self.fail_methods:
-            raise RuntimeError("forced device-tags failure")
-        return list(self.device_tags)
+    def get_devices(self) -> Iterable[DeviceInfo]:
+        if "get_devices" in self.fail_methods:
+            raise RuntimeError("forced devices failure")
+        return list(self.devices)
 
     def get_boots(
-        self, device_tag: str, earliest_commit: datetime | None, latest_commit: datetime | None
+        self, device: str, earliest_commit: datetime | None, latest_commit: datetime | None
     ) -> Iterable[Boot]:
         if "get_boots" in self.fail_methods:
             raise RuntimeError("forced boots failure")
-        self.last_get_boots_args = (device_tag, earliest_commit, latest_commit)
-        return list(self.boots_by_tag.get(device_tag, []))
+        self.last_get_boots_args = (device, earliest_commit, latest_commit)
+        return list(self.boots_by_device.get(device, []))
 
     def get_records(
-        self, device_tag: str, boot_ids: Iterable[int], seqno_min: int | None, seqno_max: int | None
+        self, device: str, boot_ids: Iterable[int], seqno_min: int | None, seqno_max: int | None
     ) -> Iterable[CANFrameRecord]:
         if "get_records" in self.fail_methods:
             raise RuntimeError("forced records failure")
         boot_list = [int(boot_id) for boot_id in boot_ids]
-        self.last_get_records_args = (device_tag, boot_list, seqno_min, seqno_max)
+        self.last_get_records_args = (device, boot_list, seqno_min, seqno_max)
         self.get_records_call_count += 1
 
-        scripted = self.records_script_by_tag.get(device_tag)
+        scripted = self.records_script_by_device.get(device)
         if scripted:
             source = list(scripted.pop(0))
         else:
-            source = list(self.records_by_tag.get(device_tag, []))
+            source = list(self.records_by_device.get(device, []))
         return self._filter_records(source, boot_list, seqno_min, seqno_max)
 
     @staticmethod
@@ -751,10 +797,22 @@ class _RestAPITests(unittest.TestCase):
             frame=CANFrame(can_id=can_id, data=data),
         )
 
-    def _post_commit(self, payload: bytes = b"", *, device_uid: str = "123", device_tag: str = "abc"):
+    def _post_commit(
+        self,
+        payload: bytes = b"",
+        *,
+        device_uid: str = "123",
+        device: str | None = "abc",
+        device_tag: str | None = None,
+    ):
+        params: dict[str, str] = {"device_uid": device_uid}
+        if device is not None:
+            params["device"] = device
+        if device_tag is not None:
+            params["device_tag"] = device_tag
         return self.client.post(
             "/cf3d/api/v1/commit",
-            params={"device_uid": device_uid, "device_tag": device_tag},
+            params=params,
             content=payload,
         )
 
@@ -791,22 +849,22 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual("321", response.text)
         self.assertEqual(1, len(self.database.commits))
-        committed_uid, committed_tag, committed_records = self.database.commits[0]
+        committed_uid, committed_device, committed_records = self.database.commits[0]
         self.assertEqual(123, committed_uid)
-        self.assertEqual("abc", committed_tag)
+        self.assertEqual("abc", committed_device)
         self.assertEqual([], committed_records)
 
     def test_commit_valid_record_is_decoded_and_committed(self) -> None:
         expected = self._make_record(seqno=42, boot_id=7, ts_boot_us=123456, can_id=0x1ABCDEFF, data=b"\xaa\xbb")
         payload = box(_pack_unboxed_commit_record_v0(expected))
-        response = self._post_commit(payload, device_uid="0x10", device_tag="vehicle")
+        response = self._post_commit(payload, device_uid="0x10", device="vehicle")
         self.assertEqual(200, response.status_code)
         self.assertEqual("321", response.text)
 
         self.assertEqual(1, len(self.database.commits))
-        committed_uid, committed_tag, committed_records = self.database.commits[0]
+        committed_uid, committed_device, committed_records = self.database.commits[0]
         self.assertEqual(16, committed_uid)
-        self.assertEqual("vehicle", committed_tag)
+        self.assertEqual("vehicle", committed_device)
         self.assertEqual([expected], committed_records)
 
     def test_validation_dataset_all_blocks_decode_and_parse(self) -> None:
@@ -842,22 +900,25 @@ class _RestAPITests(unittest.TestCase):
         with _import_test_client_class()(create_app(SqliteDatabase())) as local_client:
             commit_response = local_client.post(
                 "/cf3d/api/v1/commit",
-                params={"device_uid": "0x123", "device_tag": "validation-dataset"},
+                params={"device_uid": "0x123", "device": "validation-dataset"},
                 content=payload,
             )
             self.assertEqual(200, commit_response.status_code)
             self.assertEqual(str(expected_latest_seqno), commit_response.text.splitlines()[0])
 
-            tags_response = local_client.get("/cf3d/api/v1/device-tags")
+            tags_response = local_client.get("/cf3d/api/v1/devices")
             self.assertEqual(200, tags_response.status_code)
-            self.assertIn("validation-dataset", tags_response.json()["device_tags"])
+            self.assertIn("validation-dataset", [item["device"] for item in tags_response.json()["devices"]])
 
-            boots_response = local_client.get("/cf3d/api/v1/boots", params={"device_tag": "validation-dataset"})
+            boots_response = local_client.get("/cf3d/api/v1/boots", params={"device": "validation-dataset"})
             self.assertEqual(200, boots_response.status_code)
             boot_ids = sorted(int(item["boot_id"]) for item in boots_response.json()["boots"])
             self.assertEqual([0, 1, 2], boot_ids)
 
-            query_params: list[tuple[str, str]] = [("device_tag", "validation-dataset"), ("limit", "10000")]
+            query_params: list[tuple[str, str | int | float | bool | None]] = [
+                ("device", "validation-dataset"),
+                ("limit", "10000"),
+            ]
             query_params.extend(("boot_id", str(boot_id)) for boot_id in boot_ids)
             records_response = local_client.get("/cf3d/api/v1/records", params=query_params)
             self.assertEqual(200, records_response.status_code)
@@ -961,61 +1022,90 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual([16, 16, 16, 16], committed_uids)
 
     def test_missing_device_uid_is_rejected(self) -> None:
-        response = self.client.post("/cf3d/api/v1/commit", params={"device_tag": "abc"})
+        response = self.client.post("/cf3d/api/v1/commit", params={"device": "abc"})
         self.assertEqual(422, response.status_code)
 
-    def test_missing_device_tag_is_rejected(self) -> None:
+    def test_missing_device_is_rejected(self) -> None:
         response = self.client.post("/cf3d/api/v1/commit", params={"device_uid": "123"})
         self.assertEqual(422, response.status_code)
+
+    def test_commit_accepts_deprecated_device_tag_alias(self) -> None:
+        response = self._post_commit(device=None, device_tag="legacy-device")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("321", response.text)
+        self.assertEqual(1, len(self.database.commits))
+        _, committed_device, _ = self.database.commits[0]
+        self.assertEqual("legacy-device", committed_device)
+
+    def test_commit_prefers_device_when_alias_conflicts(self) -> None:
+        with self.assertLogs(__name__, level="WARNING") as captured:
+            response = self._post_commit(device="new-device", device_tag="old-device")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("321", response.text)
+        self.assertTrue(any("preferring 'device'" in line for line in captured.output))
+        self.assertEqual(1, len(self.database.commits))
+        _, committed_device, _ = self.database.commits[0]
+        self.assertEqual("new-device", committed_device)
 
     def test_invalid_device_uid_is_rejected(self) -> None:
         response = self.client.post(
             "/cf3d/api/v1/commit",
-            params={"device_uid": "xyz", "device_tag": "abc"},
+            params={"device_uid": "xyz", "device": "abc"},
         )
         self.assertEqual(422, response.status_code)
 
-    def test_empty_device_tag_is_rejected(self) -> None:
+    def test_empty_device_is_rejected(self) -> None:
         response = self.client.post(
             "/cf3d/api/v1/commit",
-            params={"device_uid": "123", "device_tag": ""},
+            params={"device_uid": "123", "device": ""},
         )
         self.assertEqual(422, response.status_code)
 
-    def test_get_device_tags_returns_json(self) -> None:
-        self.database.device_tags = ["alpha", "beta"]
-        response = self.client.get("/cf3d/api/v1/device-tags")
+    def test_get_devices_returns_json(self) -> None:
+        self.database.devices = [
+            DeviceInfo(device="alpha", last_heard_ts=1704067200, last_uid=123),
+            DeviceInfo(device="beta", last_heard_ts=1704067201, last_uid=456),
+        ]
+        response = self.client.get("/cf3d/api/v1/devices")
         self.assertEqual(200, response.status_code)
-        self.assertEqual({"device_tags": ["alpha", "beta"]}, response.json())
+        self.assertEqual(
+            {
+                "devices": [
+                    {"device": "alpha", "last_heard_ts": 1704067200, "last_uid": 123},
+                    {"device": "beta", "last_heard_ts": 1704067201, "last_uid": 456},
+                ]
+            },
+            response.json(),
+        )
 
-    def test_get_device_tags_internal_error_returns_500(self) -> None:
-        self.database.fail_methods.add("get_device_tags")
-        response = self.client.get("/cf3d/api/v1/device-tags")
+    def test_get_devices_internal_error_returns_500(self) -> None:
+        self.database.fail_methods.add("get_devices")
+        response = self.client.get("/cf3d/api/v1/devices")
         self.assertEqual(500, response.status_code)
 
     def test_get_boots_returns_json(self) -> None:
         first = self._make_record(seqno=10, boot_id=7, ts_boot_us=1, can_id=0x100, data=b"\xaa")
         last = self._make_record(seqno=20, boot_id=7, ts_boot_us=2, can_id=0x200, data=b"\xbb")
-        self.database.boots_by_tag["alpha"] = [Boot(boot_id=7, first_record=first, last_record=last)]
+        self.database.boots_by_device["alpha"] = [Boot(boot_id=7, first_record=first, last_record=last)]
 
-        response = self.client.get("/cf3d/api/v1/boots", params={"device_tag": "alpha"})
+        response = self.client.get("/cf3d/api/v1/boots", params={"device": "alpha"})
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertEqual("alpha", body["device_tag"])
+        self.assertEqual("alpha", body["device"])
         self.assertEqual(1, len(body["boots"]))
         self.assertEqual("aa", body["boots"][0]["first_record"]["frame"]["data_hex"])
         self.assertEqual("bb", body["boots"][0]["last_record"]["frame"]["data_hex"])
 
     def test_get_boots_unknown_tag_returns_empty_list(self) -> None:
-        response = self.client.get("/cf3d/api/v1/boots", params={"device_tag": "unknown"})
+        response = self.client.get("/cf3d/api/v1/boots", params={"device": "unknown"})
         self.assertEqual(200, response.status_code)
-        self.assertEqual({"device_tag": "unknown", "boots": []}, response.json())
+        self.assertEqual({"device": "unknown", "boots": []}, response.json())
 
     def test_get_boots_passes_parsed_datetime_filters(self) -> None:
         response = self.client.get(
             "/cf3d/api/v1/boots",
             params={
-                "device_tag": "alpha",
+                "device": "alpha",
                 "earliest_commit": "2024-01-01T00:00:00Z",
                 "latest_commit": "2024-01-01T01:00:00Z",
             },
@@ -1031,15 +1121,15 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(int(datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc).timestamp()), int(latest.timestamp()))
 
     def test_get_boots_invalid_datetime_rejected(self) -> None:
-        response = self.client.get("/cf3d/api/v1/boots", params={"device_tag": "alpha", "earliest_commit": "bad"})
+        response = self.client.get("/cf3d/api/v1/boots", params={"device": "alpha", "earliest_commit": "bad"})
         self.assertEqual(422, response.status_code)
 
     def test_get_records_requires_boot_id(self) -> None:
-        response = self.client.get("/cf3d/api/v1/records", params={"device_tag": "alpha"})
+        response = self.client.get("/cf3d/api/v1/records", params={"device": "alpha"})
         self.assertEqual(422, response.status_code)
 
     def test_get_records_returns_limited_first_page_results(self) -> None:
-        self.database.records_by_tag["alpha"] = [
+        self.database.records_by_device["alpha"] = [
             self._make_record(seqno=1, boot_id=1, data=b"\x01"),
             self._make_record(seqno=2, boot_id=1, data=b"\x02"),
             self._make_record(seqno=3, boot_id=1, data=b"\x03"),
@@ -1047,7 +1137,7 @@ class _RestAPITests(unittest.TestCase):
 
         response = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "limit": 2},
+            params={"device": "alpha", "boot_id": 1, "limit": 2},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1058,7 +1148,7 @@ class _RestAPITests(unittest.TestCase):
         self.assertFalse(body["timed_out"])
 
     def test_get_records_unknown_tag_returns_empty(self) -> None:
-        response = self.client.get("/cf3d/api/v1/records", params={"device_tag": "unknown", "boot_id": 1})
+        response = self.client.get("/cf3d/api/v1/records", params={"device": "unknown", "boot_id": 1})
         self.assertEqual(200, response.status_code)
         body = response.json()
         self.assertEqual(0, body["total_matched"])
@@ -1068,7 +1158,7 @@ class _RestAPITests(unittest.TestCase):
     def test_get_records_invalid_range_returns_empty_200(self) -> None:
         response = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 10, "seqno_max": 1},
+            params={"device": "alpha", "boot_id": 1, "seqno_min": 10, "seqno_max": 1},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1077,14 +1167,14 @@ class _RestAPITests(unittest.TestCase):
         self.assertFalse(body["timed_out"])
 
     def test_get_records_seqno_min_filters_results(self) -> None:
-        self.database.records_by_tag["alpha"] = [
+        self.database.records_by_device["alpha"] = [
             self._make_record(seqno=1, boot_id=1),
             self._make_record(seqno=2, boot_id=1),
             self._make_record(seqno=3, boot_id=1),
         ]
         response = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 3},
+            params={"device": "alpha", "boot_id": 1, "seqno_min": 3},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1092,7 +1182,7 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual([3], [item["seqno"] for item in body["records"]])
 
     def test_get_records_seqno_min_resumes_after_last_returned_record(self) -> None:
-        self.database.records_by_tag["alpha"] = [
+        self.database.records_by_device["alpha"] = [
             self._make_record(seqno=1, boot_id=1),
             self._make_record(seqno=2, boot_id=1),
             self._make_record(seqno=3, boot_id=1),
@@ -1100,7 +1190,7 @@ class _RestAPITests(unittest.TestCase):
 
         first = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "limit": 2},
+            params={"device": "alpha", "boot_id": 1, "limit": 2},
         )
         self.assertEqual(200, first.status_code)
         first_body = first.json()
@@ -1108,7 +1198,7 @@ class _RestAPITests(unittest.TestCase):
 
         second = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 3},
+            params={"device": "alpha", "boot_id": 1, "seqno_min": 3},
         )
         self.assertEqual(200, second.status_code)
         second_body = second.json()
@@ -1116,12 +1206,12 @@ class _RestAPITests(unittest.TestCase):
 
     def test_get_records_long_poll_wakes_when_new_data_appears(self) -> None:
         wake_record = self._make_record(seqno=9, boot_id=1)
-        self.database.records_script_by_tag["alpha"] = [[], [wake_record]]
+        self.database.records_script_by_device["alpha"] = [[], [wake_record]]
 
         with patch("letopisec.rest_api.WAIT_POLL_INTERVAL_S", 0.01):
             response = self.client.get(
                 "/cf3d/api/v1/records",
-                params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 9, "wait_timeout_s": 1},
+                params={"device": "alpha", "boot_id": 1, "seqno_min": 9, "wait_timeout_s": 1},
             )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1130,12 +1220,12 @@ class _RestAPITests(unittest.TestCase):
         self.assertGreaterEqual(self.database.get_records_call_count, 2)
 
     def test_get_records_long_poll_timeout_returns_timed_out_true(self) -> None:
-        self.database.records_script_by_tag["alpha"] = [[], [], [], []]
+        self.database.records_script_by_device["alpha"] = [[], [], [], []]
 
         with patch("letopisec.rest_api.WAIT_POLL_INTERVAL_S", 0.01):
             response = self.client.get(
                 "/cf3d/api/v1/records",
-                params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 101, "wait_timeout_s": 1},
+                params={"device": "alpha", "boot_id": 1, "seqno_min": 101, "wait_timeout_s": 1},
             )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1145,13 +1235,13 @@ class _RestAPITests(unittest.TestCase):
     def test_get_records_wait_timeout_validation(self) -> None:
         response = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "wait_timeout_s": 31},
+            params={"device": "alpha", "boot_id": 1, "wait_timeout_s": 31},
         )
         self.assertEqual(422, response.status_code)
 
     def test_get_records_internal_error_returns_500(self) -> None:
         self.database.fail_methods.add("get_records")
-        response = self.client.get("/cf3d/api/v1/records", params={"device_tag": "alpha", "boot_id": 1})
+        response = self.client.get("/cf3d/api/v1/records", params={"device": "alpha", "boot_id": 1})
         self.assertEqual(500, response.status_code)
 
 

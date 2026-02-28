@@ -44,3 +44,19 @@ export LETOPISEC_LOG_FILE=/var/log/letopisec/server.log
 export LETOPISEC_LOG_LEVEL=INFO
 uvicorn --factory letopisec.server:create_app_from_env
 ```
+
+## Manual interrogation
+
+The REST API is very simple and can be exercised manually using wget or similar tools. Examples (`jq` is added for nicer formatting):
+
+```bash
+wget -qO- "http://localhost:8000/cf3d/api/v1/devices" | jq
+```
+
+```bash
+wget -qO- "http://localhost:8000/cf3d/api/v1/boots?device=my+device" | jq
+```
+
+```bash
+wget -qO- "http://localhost:8000/cf3d/api/v1/records?device=my+device&boot_id=1" | jq
+```

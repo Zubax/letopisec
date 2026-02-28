@@ -14,3 +14,12 @@ python tools/letopisec_ingest.py --server http://127.0.0.1:8000 --device_uid 0x1
 ## `e2e_test.py`
 
 Runs a full local E2E check; intended for development only. Read the contents for details.
+
+## `serve_smoke_test.py`
+
+Runs a focused startup smoke test for `letopisec serve`:
+- launches a real `letopisec serve` process in a temporary environment,
+- waits for readiness via `GET /cf3d/api/v1/device-tags`,
+- terminates the process and reports detailed diagnostics on failure.
+
+This is the script used by the `nox -s serve_smoke` session.

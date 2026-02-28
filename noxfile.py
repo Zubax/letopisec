@@ -7,8 +7,9 @@ import nox
 PACKAGE_DIR = Path("letopisec")
 EXCLUDED_TEST_FILE = "__main__.py"
 E2E_SCRIPT_PATH = Path("tools") / "e2e_test.py"
+SERVE_SMOKE_SCRIPT_PATH = Path("tools") / "serve_smoke_test.py"
 
-nox.options.sessions = ("tests", "e2e", "black", "mypy")
+nox.options.sessions = ("tests", "serve_smoke", "e2e", "black", "mypy")
 
 
 def _discover_test_modules() -> list[str]:
@@ -52,6 +53,14 @@ def e2e(session: nox.Session) -> None:
     if not E2E_SCRIPT_PATH.exists():
         raise RuntimeError(f"E2E test script is missing: {E2E_SCRIPT_PATH}")
     session.run("python", str(E2E_SCRIPT_PATH), external=True)
+
+
+@nox.session
+def serve_smoke(session: nox.Session) -> None:
+    session.install(".")
+    if not SERVE_SMOKE_SCRIPT_PATH.exists():
+        raise RuntimeError(f"Serve smoke script is missing: {SERVE_SMOKE_SCRIPT_PATH}")
+    session.run("python", str(SERVE_SMOKE_SCRIPT_PATH))
 
 
 @nox.session

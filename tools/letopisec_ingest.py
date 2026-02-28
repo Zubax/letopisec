@@ -15,6 +15,7 @@ Notes:
   - This tool sends opaque bytes; it does not parse CF3D payload contents.
   - The server may still reject malformed data at decode/parse time.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -8,17 +8,19 @@ from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 from unittest.mock import patch
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
-from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
 from letopisec.database import Boot, Database, SqliteDatabase
 from letopisec.fec_envelope import RECORD_BYTES, USER_DATA_BYTES, UnboxError, box, unbox
 from letopisec.model import CANFrame, CANFrameRecord
+
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
 
 WAIT_MAX_TIMEOUT_S = 30
 WAIT_POLL_INTERVAL_S = 0.25
@@ -635,6 +637,16 @@ def create_app(database: Database) -> FastAPI:
     return created_app
 
 
+def _import_test_client_class() -> type["TestClient"]:
+    LOGGER.debug("Importing FastAPI TestClient for REST API unit tests")
+    try:
+        from fastapi.testclient import TestClient as imported_test_client
+    except Exception as ex:
+        LOGGER.critical("Failed to import FastAPI TestClient", exc_info=True)
+        raise RuntimeError("Running REST API tests requires optional dependency 'httpx'.") from ex
+    return imported_test_client
+
+
 class _FakeDatabase(Database):
     def __init__(self, ack_seqno: int = 0) -> None:
         self._ack_seqno = ack_seqno
@@ -709,12 +721,12 @@ class _FakeDatabase(Database):
 
 class _RestAPITests(unittest.TestCase):
     app: ClassVar[FastAPI]
-    client: ClassVar[TestClient]
+    client: ClassVar["TestClient"]
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = create_app(SqliteDatabase())
-        cls.client = TestClient(cls.app)
+        cls.client = _import_test_client_class()(cls.app)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -831,7 +843,7 @@ class _RestAPITests(unittest.TestCase):
         expected_seqnos = [record.seqno for record in expected_records]
         expected_latest_seqno = expected_seqnos[-1]
 
-        with TestClient(create_app(SqliteDatabase())) as local_client:
+        with _import_test_client_class()(create_app(SqliteDatabase())) as local_client:
             commit_response = local_client.post(
                 "/cf3d/api/v1/commit",
                 params={"device_uid": "0x123", "device_tag": "validation-dataset"},

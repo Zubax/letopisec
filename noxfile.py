@@ -21,8 +21,28 @@ def _discover_test_modules() -> list[str]:
 
 @nox.session
 def tests(session: nox.Session) -> None:
+    session.install("coverage")
     modules = _discover_test_modules()
-    session.run("python", "-m", "unittest", *modules)
+    session.run(
+        "coverage",
+        "run",
+        "--branch",
+        "--source",
+        PACKAGE_DIR.name,
+        "--omit",
+        "*/letopisec/__main__.py",
+        "-m",
+        "unittest",
+        *modules,
+    )
+    session.run(
+        "coverage",
+        "report",
+        "-m",
+        "--omit",
+        "*/letopisec/__main__.py",
+        "--fail-under=80",
+    )
 
 
 @nox.session

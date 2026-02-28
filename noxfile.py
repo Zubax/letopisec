@@ -21,7 +21,7 @@ def _discover_test_modules() -> list[str]:
 
 @nox.session
 def tests(session: nox.Session) -> None:
-    session.install("coverage")
+    session.install("coverage", "httpx", ".")
     modules = _discover_test_modules()
     session.run(
         "coverage",
@@ -53,5 +53,5 @@ def black(session: nox.Session) -> None:
 
 @nox.session
 def mypy(session: nox.Session) -> None:
-    session.install("mypy")
+    session.install("mypy", ".")
     session.run("mypy", "letopisec")

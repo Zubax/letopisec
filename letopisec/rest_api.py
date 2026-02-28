@@ -68,7 +68,6 @@ class RecordsFilterEcho(BaseModel):
     seqno_max: int | None
     wait_timeout_s: int
     limit: int
-    offset: int
 
 
 class RecordsResponse(BaseModel):
@@ -386,7 +385,9 @@ def _query_records_once(
     description=(
         "Returns records for specified device tag and boot IDs. "
         "Optional long polling is enabled via wait_timeout_s. "
-        "For new-since behavior, set seqno_min to last_seen_seqno + 1."
+        "For lossless pagination, set seqno_min to last returned record seqno + 1. "
+        "For catch-up behavior that may skip unseen records from truncated pages, "
+        "set seqno_min to latest_seqno_seen + 1."
     ),
     responses={
         200: {
@@ -401,7 +402,6 @@ def _query_records_once(
                             "seqno_max": None,
                             "wait_timeout_s": 0,
                             "limit": 1000,
-                            "offset": 0,
                         },
                         "total_matched": 1,
                         "latest_seqno_seen": 10,
@@ -432,7 +432,6 @@ async def get_records(
         Query(ge=0, le=WAIT_MAX_TIMEOUT_S, description="Optional long-poll timeout in seconds"),
     ] = 0,
     limit: Annotated[int, Query(ge=1, le=RECORDS_MAX_LIMIT, description="Page size")] = RECORDS_DEFAULT_LIMIT,
-    offset: Annotated[int, Query(ge=0, description="Pagination offset")] = 0,
     database: Database = Depends(get_database),
 ) -> RecordsResponse:
     boot_ids = sorted(set(int(value) for value in boot_id))
@@ -442,18 +441,15 @@ async def get_records(
         seqno_max=seqno_max,
         wait_timeout_s=wait_timeout_s,
         limit=limit,
-        offset=offset,
     )
     LOGGER.debug(
-        "Records query request: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r wait_timeout_s=%d "
-        "limit=%d offset=%d",
+        "Records query request: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r wait_timeout_s=%d limit=%d",
         device_tag,
         boot_ids,
         seqno_min,
         seqno_max,
         wait_timeout_s,
         limit,
-        offset,
     )
 
     if seqno_max is not None and seqno_min is not None and seqno_min > seqno_max:
@@ -496,7 +492,7 @@ async def get_records(
             )
 
             if total_matched > 0:
-                paged_records = matching_records[offset : offset + limit]
+                paged_records = matching_records[:limit]
                 serialized = [_serialize_record(record) for record in paged_records]
                 LOGGER.info(
                     "Records query completed with data: device_tag=%r poll_count=%d total_matched=%d returned=%d",
@@ -1042,7 +1038,7 @@ class _RestAPITests(unittest.TestCase):
         response = self.client.get("/cf3d/api/v1/records", params={"device_tag": "alpha"})
         self.assertEqual(422, response.status_code)
 
-    def test_get_records_returns_paginated_results(self) -> None:
+    def test_get_records_returns_limited_first_page_results(self) -> None:
         self.database.records_by_tag["alpha"] = [
             self._make_record(seqno=1, boot_id=1, data=b"\x01"),
             self._make_record(seqno=2, boot_id=1, data=b"\x02"),
@@ -1051,13 +1047,14 @@ class _RestAPITests(unittest.TestCase):
 
         response = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "limit": 2, "offset": 1},
+            params={"device_tag": "alpha", "boot_id": 1, "limit": 2},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
         self.assertEqual(3, body["total_matched"])
         self.assertEqual(2, len(body["records"]))
-        self.assertEqual([2, 3], [item["seqno"] for item in body["records"]])
+        self.assertEqual([1, 2], [item["seqno"] for item in body["records"]])
+        self.assertNotIn("offset", body["filters"])
         self.assertFalse(body["timed_out"])
 
     def test_get_records_unknown_tag_returns_empty(self) -> None:
@@ -1093,6 +1090,29 @@ class _RestAPITests(unittest.TestCase):
         body = response.json()
         self.assertEqual(1, body["total_matched"])
         self.assertEqual([3], [item["seqno"] for item in body["records"]])
+
+    def test_get_records_seqno_min_resumes_after_last_returned_record(self) -> None:
+        self.database.records_by_tag["alpha"] = [
+            self._make_record(seqno=1, boot_id=1),
+            self._make_record(seqno=2, boot_id=1),
+            self._make_record(seqno=3, boot_id=1),
+        ]
+
+        first = self.client.get(
+            "/cf3d/api/v1/records",
+            params={"device_tag": "alpha", "boot_id": 1, "limit": 2},
+        )
+        self.assertEqual(200, first.status_code)
+        first_body = first.json()
+        self.assertEqual([1, 2], [item["seqno"] for item in first_body["records"]])
+
+        second = self.client.get(
+            "/cf3d/api/v1/records",
+            params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 3},
+        )
+        self.assertEqual(200, second.status_code)
+        second_body = second.json()
+        self.assertEqual([3], [item["seqno"] for item in second_body["records"]])
 
     def test_get_records_long_poll_wakes_when_new_data_appears(self) -> None:
         wake_record = self._make_record(seqno=9, boot_id=1)

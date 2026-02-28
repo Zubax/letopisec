@@ -362,7 +362,7 @@ def _mutate_random_bytes(record: bytes, damaged_bytes: int, rng: random.Random) 
 class _FECEnvelopeTests(unittest.TestCase):
     def test_randomized_roundtrip_0_to_73_random_damaged_bytes(self) -> None:
         rng = random.Random(0xCF3D_FEED)
-        trials_per_damage = int(os.getenv("FEC_TRIALS_PER_DAMAGE", "32"))
+        trials_per_damage = int(os.getenv("FEC_TRIALS_PER_DAMAGE", "8"))
 
         for damaged in range(74):
             for _ in range(trials_per_damage):

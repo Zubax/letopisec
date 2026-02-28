@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+"""
+letopisec_ingest: Upload raw CF3D logs to a Letopisec server.
+
+The uploader streams one or more .cf3d files in fixed-size chunks to:
+  /cf3d/api/v1/commit
+
+Behavior summary:
+  - Files are processed in deterministic lexicographic order.
+  - Each chunk is POSTed with device metadata (device_uid, device_tag).
+  - Transient failures are retried with exponential backoff.
+  - A verbose final ingest report is always emitted.
+
+Notes:
+  - This tool sends opaque bytes; it does not parse CF3D payload contents.
+  - The server may still reject malformed data at decode/parse time.
+"""
 from __future__ import annotations
 
 import argparse
@@ -18,6 +34,7 @@ CHUNK_BYTES = 8 * 1024 * 1024
 REQUEST_TIMEOUT_S = 30.0
 MAX_ATTEMPTS = 5
 BASE_BACKOFF_S = 1.0
+HELP_HEADER = (__doc__ or "").strip()
 
 LOGGER = logging.getLogger("letopisec_ingest")
 
@@ -89,7 +106,8 @@ def _parse_device_uid(value: str) -> int:
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Upload raw CF3D log file bytes to Letopisec commit endpoint with retries."
+        description=HELP_HEADER,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--server", required=True, help="Base server URL, e.g., http://192.168.1.123")
     parser.add_argument("--device_uid", required=True, type=_parse_device_uid, help="Integer literal (auto-radix)")

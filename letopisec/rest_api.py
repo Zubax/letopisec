@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from letopisec.database import Boot, Database, DeviceInfo, SqliteDatabase
 from letopisec.fec_envelope import RECORD_BYTES, USER_DATA_BYTES, UnboxError, box, unbox
-from letopisec.model import CANFrame, CANFrameRecord
+from letopisec.model import CAN_EFF_FLAG, CAN_ERR_FLAG, CAN_RTR_FLAG, CANFrame, CANFrameRecord
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
@@ -36,7 +36,10 @@ class ErrorResponse(BaseModel):
 
 
 class CANFrameDTO(BaseModel):
-    can_id: int = Field(description="CAN ID including SocketCAN flags")
+    can_id: int = Field(description="CAN ID without SocketCAN flags")
+    extended: bool = Field(description="True if the frame uses extended (29-bit) identifier format")
+    rtr: bool = Field(description="True if the frame is a remote transmission request")
+    error: bool = Field(description="True if the frame is an error frame")
     data_hex: str = Field(description="CAN frame payload bytes encoded as lowercase hexadecimal")
 
 
@@ -84,7 +87,13 @@ class RecordsResponse(BaseModel):
 
 
 def _serialize_frame(frame: CANFrame) -> CANFrameDTO:
-    return CANFrameDTO(can_id=frame.can_id, data_hex=bytes(frame.data).hex())
+    return CANFrameDTO(
+        can_id=frame.can_id,
+        extended=frame.extended,
+        rtr=frame.rtr,
+        error=frame.error,
+        data_hex=bytes(frame.data).hex(),
+    )
 
 
 def _serialize_record(record: CANFrameRecord) -> CANFrameRecordDTO:
@@ -240,13 +249,18 @@ async def commit(
 
         accepted_records.append(record)
         LOGGER.debug(
-            "Commit record accepted: device_uid=%d device=%r index=%d seqno=%d boot_id=%d can_id=%d data_len=%d",
+            "Commit record accepted: device_uid=%d device=%r index=%d seqno=%d boot_id=%d "
+            "can_id_with_flags=%d can_id=%d extended=%s rtr=%s error=%s data_len=%d",
             device_uid,
             resolved_device,
             index,
             record.seqno,
             record.boot_id,
+            record.frame.can_id_with_flags,
             record.frame.can_id,
+            record.frame.extended,
+            record.frame.rtr,
+            record.frame.error,
             len(bytes(record.frame.data)),
         )
 
@@ -347,13 +361,25 @@ def get_devices(
                                     "ts_boot_us": 10,
                                     "boot_id": 100,
                                     "seqno": 1,
-                                    "frame": {"can_id": 291, "data_hex": "01"},
+                                    "frame": {
+                                        "can_id": 291,
+                                        "extended": False,
+                                        "rtr": False,
+                                        "error": False,
+                                        "data_hex": "01",
+                                    },
                                 },
                                 "last_record": {
                                     "ts_boot_us": 20,
                                     "boot_id": 100,
                                     "seqno": 2,
-                                    "frame": {"can_id": 291, "data_hex": "02"},
+                                    "frame": {
+                                        "can_id": 291,
+                                        "extended": False,
+                                        "rtr": False,
+                                        "error": False,
+                                        "data_hex": "02",
+                                    },
                                 },
                             }
                         ],
@@ -453,7 +479,13 @@ def _query_records_once(
                                 "ts_boot_us": 100,
                                 "boot_id": 1,
                                 "seqno": 10,
-                                "frame": {"can_id": 291, "data_hex": "aabb"},
+                                "frame": {
+                                    "can_id": 291,
+                                    "extended": False,
+                                    "rtr": False,
+                                    "error": False,
+                                    "data_hex": "aabb",
+                                },
                             }
                         ],
                     }
@@ -606,7 +638,7 @@ def _parse_unboxed_commit_record(buf: bytes | bytearray | memoryview) -> CANFram
         return None
 
     boot_id, seqno, timestamp_us = struct.unpack_from("<QQQ", mv, 8)
-    (can_id,) = struct.unpack_from("<I", mv, 36)
+    (can_id_with_flags,) = struct.unpack_from("<I", mv, 36)
     data_len = int(mv[40])
     if data_len > 64:
         LOGGER.warning("Unboxed record has invalid CAN payload length: data_len=%d", data_len)
@@ -622,7 +654,7 @@ def _parse_unboxed_commit_record(buf: bytes | bytearray | memoryview) -> CANFram
         ts_boot_us=int(timestamp_us),
         boot_id=int(boot_id),
         seqno=int(seqno),
-        frame=CANFrame(can_id=int(can_id), data=data),
+        frame=CANFrame(can_id_with_flags=int(can_id_with_flags), data=data),
     )
 
 
@@ -634,7 +666,7 @@ def _pack_unboxed_commit_record_v0(record: CANFrameRecord) -> bytes:
     out = bytearray(USER_DATA_BYTES)
     out[0] = 0
     struct.pack_into("<QQQ", out, 8, record.boot_id, record.seqno, record.ts_boot_us)
-    struct.pack_into("<I", out, 36, record.frame.can_id)
+    struct.pack_into("<I", out, 36, record.frame.can_id_with_flags)
     out[40] = len(data)
     out[41 : 41 + len(data)] = data
     return bytes(out)
@@ -777,14 +809,14 @@ class _RestAPITests(unittest.TestCase):
         *,
         boot_id: int = 1001,
         ts_boot_us: int = 5_000,
-        can_id: int = 0x123,
+        can_id_with_flags: int = 0x123,
         data: bytes = b"\x01\x02",
     ) -> CANFrameRecord:
         return CANFrameRecord(
             ts_boot_us=ts_boot_us,
             boot_id=boot_id,
             seqno=seqno,
-            frame=CANFrame(can_id=can_id, data=data),
+            frame=CANFrame(can_id_with_flags=can_id_with_flags, data=data),
         )
 
     def _post_commit(
@@ -845,7 +877,13 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual([], committed_records)
 
     def test_commit_valid_record_is_decoded_and_committed(self) -> None:
-        expected = self._make_record(seqno=42, boot_id=7, ts_boot_us=123456, can_id=0x1ABCDEFF, data=b"\xaa\xbb")
+        expected = self._make_record(
+            seqno=42,
+            boot_id=7,
+            ts_boot_us=123456,
+            can_id_with_flags=0x1ABCDEFF,
+            data=b"\xaa\xbb",
+        )
         payload = box(_pack_unboxed_commit_record_v0(expected))
         response = self._post_commit(payload, device_uid="0x10", device="vehicle")
         self.assertEqual(200, response.status_code)
@@ -920,10 +958,18 @@ class _RestAPITests(unittest.TestCase):
 
             first_expected = expected_records[0]
             last_expected = expected_records[-1]
-            self.assertEqual(first_expected.frame.can_id, int(returned_records[0]["frame"]["can_id"]))
-            self.assertEqual(bytes(first_expected.frame.data).hex(), returned_records[0]["frame"]["data_hex"])
-            self.assertEqual(last_expected.frame.can_id, int(returned_records[-1]["frame"]["can_id"]))
-            self.assertEqual(bytes(last_expected.frame.data).hex(), returned_records[-1]["frame"]["data_hex"])
+            first_frame = returned_records[0]["frame"]
+            last_frame = returned_records[-1]["frame"]
+            self.assertEqual(first_expected.frame.can_id, int(first_frame["can_id"]))
+            self.assertEqual(first_expected.frame.extended, bool(first_frame["extended"]))
+            self.assertEqual(first_expected.frame.rtr, bool(first_frame["rtr"]))
+            self.assertEqual(first_expected.frame.error, bool(first_frame["error"]))
+            self.assertEqual(bytes(first_expected.frame.data).hex(), first_frame["data_hex"])
+            self.assertEqual(last_expected.frame.can_id, int(last_frame["can_id"]))
+            self.assertEqual(last_expected.frame.extended, bool(last_frame["extended"]))
+            self.assertEqual(last_expected.frame.rtr, bool(last_frame["rtr"]))
+            self.assertEqual(last_expected.frame.error, bool(last_frame["error"]))
+            self.assertEqual(bytes(last_expected.frame.data).hex(), last_frame["data_hex"])
 
     def test_commit_partial_decode_failure_returns_207_with_ack_first_line(self) -> None:
         valid = self._make_record(seqno=5)
@@ -976,9 +1022,31 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual([], committed_records)
 
     def test_parse_unboxed_commit_record_v0_success(self) -> None:
-        expected = self._make_record(seqno=777, boot_id=17, ts_boot_us=987654321, can_id=0x123, data=b"\x11\x22\x33")
+        expected = self._make_record(
+            seqno=777,
+            boot_id=17,
+            ts_boot_us=987654321,
+            can_id_with_flags=0x123,
+            data=b"\x11\x22\x33",
+        )
         parsed = _parse_unboxed_commit_record(_pack_unboxed_commit_record_v0(expected))
         self.assertEqual(expected, parsed)
+
+    def test_pack_and_parse_unboxed_commit_record_preserves_flags(self) -> None:
+        flagged = self._make_record(
+            seqno=778,
+            boot_id=18,
+            ts_boot_us=123456789,
+            can_id_with_flags=(CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_ERR_FLAG | 0x12),
+            data=b"\x44\x55",
+        )
+        parsed = _parse_unboxed_commit_record(_pack_unboxed_commit_record_v0(flagged))
+        self.assertEqual(flagged, parsed)
+        assert parsed is not None
+        self.assertEqual(0x12, parsed.frame.can_id)
+        self.assertTrue(parsed.frame.extended)
+        self.assertTrue(parsed.frame.rtr)
+        self.assertTrue(parsed.frame.error)
 
     def test_parse_unboxed_commit_record_rejects_unsupported_version(self) -> None:
         payload = bytearray(USER_DATA_BYTES)
@@ -1073,8 +1141,8 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(500, response.status_code)
 
     def test_get_boots_returns_json(self) -> None:
-        first = self._make_record(seqno=10, boot_id=7, ts_boot_us=1, can_id=0x100, data=b"\xaa")
-        last = self._make_record(seqno=20, boot_id=7, ts_boot_us=2, can_id=0x200, data=b"\xbb")
+        first = self._make_record(seqno=10, boot_id=7, ts_boot_us=1, can_id_with_flags=0x100, data=b"\xaa")
+        last = self._make_record(seqno=20, boot_id=7, ts_boot_us=2, can_id_with_flags=0x200, data=b"\xbb")
         self.database.boots_by_device["alpha"] = [Boot(boot_id=7, first_record=first, last_record=last)]
 
         response = self.client.get("/cf3d/api/v1/boots", params={"device": "alpha"})
@@ -1084,6 +1152,12 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(1, len(body["boots"]))
         self.assertEqual("aa", body["boots"][0]["first_record"]["frame"]["data_hex"])
         self.assertEqual("bb", body["boots"][0]["last_record"]["frame"]["data_hex"])
+        self.assertFalse(body["boots"][0]["first_record"]["frame"]["extended"])
+        self.assertFalse(body["boots"][0]["first_record"]["frame"]["rtr"])
+        self.assertFalse(body["boots"][0]["first_record"]["frame"]["error"])
+        self.assertFalse(body["boots"][0]["last_record"]["frame"]["extended"])
+        self.assertFalse(body["boots"][0]["last_record"]["frame"]["rtr"])
+        self.assertFalse(body["boots"][0]["last_record"]["frame"]["error"])
 
     def test_get_boots_unknown_tag_returns_empty_list(self) -> None:
         response = self.client.get("/cf3d/api/v1/boots", params={"device": "unknown"})
@@ -1132,9 +1206,34 @@ class _RestAPITests(unittest.TestCase):
         body = response.json()
         self.assertEqual(2, len(body["records"]))
         self.assertEqual([1, 2], [item["seqno"] for item in body["records"]])
+        self.assertTrue(all("extended" in item["frame"] for item in body["records"]))
+        self.assertTrue(all("rtr" in item["frame"] for item in body["records"]))
+        self.assertTrue(all("error" in item["frame"] for item in body["records"]))
+        self.assertTrue(all(item["frame"]["extended"] is False for item in body["records"]))
+        self.assertTrue(all(item["frame"]["rtr"] is False for item in body["records"]))
+        self.assertTrue(all(item["frame"]["error"] is False for item in body["records"]))
         self.assertNotIn("offset", body["filters"])
         self.assertNotIn("total_matched", body)
         self.assertNotIn("timed_out", body)
+
+    def test_get_records_serializes_flags_for_flagged_frame(self) -> None:
+        flagged_id = CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_ERR_FLAG | 0x1ABC
+        self.database.records_by_device["alpha"] = [
+            self._make_record(seqno=10, boot_id=1, can_id_with_flags=flagged_id, data=b"\xfa\xce"),
+        ]
+        response = self.client.get(
+            "/cf3d/api/v1/records",
+            params={"device": "alpha", "boot_id": 1},
+        )
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual(1, len(body["records"]))
+        frame = body["records"][0]["frame"]
+        self.assertEqual(0x1ABC, frame["can_id"])
+        self.assertTrue(frame["extended"])
+        self.assertTrue(frame["rtr"])
+        self.assertTrue(frame["error"])
+        self.assertEqual("face", frame["data_hex"])
 
     def test_get_records_unknown_tag_returns_empty(self) -> None:
         response = self.client.get("/cf3d/api/v1/records", params={"device": "unknown", "boot_id": 1})

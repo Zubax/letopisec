@@ -1,5 +1,14 @@
 from dataclasses import dataclass
 
+CAN_EFF_FLAG = 0x80000000
+CAN_RTR_FLAG = 0x40000000
+CAN_ERR_FLAG = 0x20000000
+"""
+CAN ID flags mirroring those in the Linux kernel.
+"""
+
+CAN_ID_EXT_MASK = 0x1FFFFFFF
+
 
 @dataclass(frozen=True)
 class CANFrameRecord:
@@ -14,5 +23,21 @@ class CANFrameRecord:
 
 @dataclass(frozen=True)
 class CANFrame:
-    can_id: int
+    can_id_with_flags: int
     data: bytes | bytearray
+
+    @property
+    def can_id(self) -> int:
+        return self.can_id_with_flags & CAN_ID_EXT_MASK
+
+    @property
+    def extended(self) -> bool:
+        return bool(self.can_id_with_flags & CAN_EFF_FLAG)
+
+    @property
+    def rtr(self) -> bool:
+        return bool(self.can_id_with_flags & CAN_RTR_FLAG)
+
+    @property
+    def error(self) -> bool:
+        return bool(self.can_id_with_flags & CAN_ERR_FLAG)

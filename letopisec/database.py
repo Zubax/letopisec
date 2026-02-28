@@ -69,7 +69,7 @@ class _StoredFrameRow:
     device_uid: int
     ts_boot_us: int
     boot_id: int
-    can_id: int
+    can_id_with_flags: int
     data: bytes
 
 
@@ -165,7 +165,7 @@ class SqliteDatabase(Database):
                             record.ts_boot_us,
                             record.boot_id,
                             record.seqno,
-                            record.frame.can_id,
+                            record.frame.can_id_with_flags,
                             normalized_data,
                         )
                     )
@@ -191,7 +191,7 @@ class SqliteDatabase(Database):
                         ts_boot_us,
                         boot_id,
                         seqno,
-                        can_id,
+                        can_id_with_flags,
                         data
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -227,19 +227,19 @@ class SqliteDatabase(Database):
                             mismatch_count += 1
                             LOGGER.warning(
                                 "Duplicate seqno mismatch for device=%r seqno=%d "
-                                "stored(device_uid=%d boot_id=%d ts_boot_us=%d can_id=%d data=%s) "
-                                "incoming(device_uid=%d boot_id=%d ts_boot_us=%d can_id=%d data=%s)",
+                                "stored(device_uid=%d boot_id=%d ts_boot_us=%d can_id_with_flags=%d data=%s) "
+                                "incoming(device_uid=%d boot_id=%d ts_boot_us=%d can_id_with_flags=%d data=%s)",
                                 device,
                                 seqno,
                                 stored.device_uid,
                                 stored.boot_id,
                                 stored.ts_boot_us,
-                                stored.can_id,
+                                stored.can_id_with_flags,
                                 stored.data.hex(),
                                 device_uid,
                                 record.boot_id,
                                 record.ts_boot_us,
-                                record.frame.can_id,
+                                record.frame.can_id_with_flags,
                                 bytes(record.frame.data).hex(),
                             )
 
@@ -346,12 +346,12 @@ class SqliteDatabase(Database):
                     first_frame.ts_boot_us,
                     first_frame.boot_id,
                     first_frame.seqno,
-                    first_frame.can_id,
+                    first_frame.can_id_with_flags,
                     first_frame.data,
                     last_frame.ts_boot_us,
                     last_frame.boot_id,
                     last_frame.seqno,
-                    last_frame.can_id,
+                    last_frame.can_id_with_flags,
                     last_frame.data
                 FROM
                     (
@@ -395,7 +395,7 @@ class SqliteDatabase(Database):
                     boot_id=int(row[2]),
                     seqno=int(row[3]),
                     frame=CANFrame(
-                        can_id=int(row[4]),
+                        can_id_with_flags=int(row[4]),
                         data=bytes(row[5]),
                     ),
                 )
@@ -404,7 +404,7 @@ class SqliteDatabase(Database):
                     boot_id=int(row[7]),
                     seqno=int(row[8]),
                     frame=CANFrame(
-                        can_id=int(row[9]),
+                        can_id_with_flags=int(row[9]),
                         data=bytes(row[10]),
                     ),
                 )
@@ -453,7 +453,7 @@ class SqliteDatabase(Database):
             for boot_id_chunk in _chunked(unique_boot_ids, self._SQL_VARIABLE_CHUNK):
                 placeholders = ",".join("?" for _ in boot_id_chunk)
                 query = (
-                    "SELECT ts_boot_us, boot_id, seqno, can_id, data "
+                    "SELECT ts_boot_us, boot_id, seqno, can_id_with_flags, data "
                     "FROM can_frames "
                     f"WHERE device_id=? AND boot_id IN ({placeholders})"
                 )
@@ -475,7 +475,7 @@ class SqliteDatabase(Database):
                             boot_id=int(row[1]),
                             seqno=int(row[2]),
                             frame=CANFrame(
-                                can_id=int(row[3]),
+                                can_id_with_flags=int(row[3]),
                                 data=bytes(row[4]),
                             ),
                         )
@@ -538,7 +538,7 @@ class SqliteDatabase(Database):
                     ts_boot_us    INTEGER NOT NULL,
                     boot_id       INTEGER NOT NULL,
                     seqno         INTEGER NOT NULL,
-                    can_id        INTEGER NOT NULL,
+                    can_id_with_flags INTEGER NOT NULL,
                     data          BLOB    NOT NULL CHECK (length(data) <= 64),
                     FOREIGN KEY (device_id) REFERENCES devices(device_id),
                     -- Server-side idempotency key for uploader retries.
@@ -596,7 +596,7 @@ class SqliteDatabase(Database):
         for seqno_chunk in _chunked(seqno_list, self._SQL_VARIABLE_CHUNK):
             placeholders = ",".join("?" for _ in seqno_chunk)
             query = (
-                "SELECT seqno, device_uid, ts_boot_us, boot_id, can_id, data "
+                "SELECT seqno, device_uid, ts_boot_us, boot_id, can_id_with_flags, data "
                 "FROM can_frames "
                 f"WHERE device_id=? AND seqno IN ({placeholders})"
             )
@@ -606,7 +606,7 @@ class SqliteDatabase(Database):
                     device_uid=int(row[1]),
                     ts_boot_us=int(row[2]),
                     boot_id=int(row[3]),
-                    can_id=int(row[4]),
+                    can_id_with_flags=int(row[4]),
                     data=bytes(row[5]),
                 )
         LOGGER.debug("Fetched %d stored rows for verification", len(result))
@@ -618,7 +618,7 @@ class SqliteDatabase(Database):
             row.device_uid == device_uid
             and row.ts_boot_us == record.ts_boot_us
             and row.boot_id == record.boot_id
-            and row.can_id == record.frame.can_id
+            and row.can_id_with_flags == record.frame.can_id_with_flags
             and row.data == bytes(record.frame.data)
         )
 
@@ -656,14 +656,14 @@ def _make_record(
     *,
     boot_id: int = 1,
     ts_boot_us: int | None = None,
-    can_id: int = 0x123,
+    can_id_with_flags: int = 0x123,
     data: bytes = b"\xaa",
 ) -> CANFrameRecord:
     return CANFrameRecord(
         ts_boot_us=seqno if ts_boot_us is None else ts_boot_us,
         boot_id=boot_id,
         seqno=seqno,
-        frame=CANFrame(can_id=can_id, data=data),
+        frame=CANFrame(can_id_with_flags=can_id_with_flags, data=data),
     )
 
 
@@ -699,8 +699,8 @@ class _DatabaseTests(unittest.TestCase):
         self.assertEqual([1, 2], [record.seqno for record in stored])
 
     def test_duplicate_mismatch_logs_warning_and_keeps_existing(self) -> None:
-        original = _make_record(1, boot_id=10, ts_boot_us=111, can_id=0x123, data=b"\x11")
-        conflicting = _make_record(1, boot_id=11, ts_boot_us=222, can_id=0x456, data=b"\x22")
+        original = _make_record(1, boot_id=10, ts_boot_us=111, can_id_with_flags=0x123, data=b"\x11")
+        conflicting = _make_record(1, boot_id=11, ts_boot_us=222, can_id_with_flags=0x456, data=b"\x22")
         self.db.commit(device_uid=42, device="alpha", records=[original])
         with self.assertLogs(__name__, level="WARNING") as captured:
             latest = self.db.commit(device_uid=42, device="alpha", records=[conflicting])
@@ -713,6 +713,18 @@ class _DatabaseTests(unittest.TestCase):
         self.assertEqual(111, stored[0].ts_boot_us)
         self.assertEqual(0x123, stored[0].frame.can_id)
         self.assertEqual(b"\x11", bytes(stored[0].frame.data))
+
+    def test_commit_preserves_can_id_with_flags_on_round_trip(self) -> None:
+        flagged_id = 0xE0000012
+        expected = _make_record(1, boot_id=10, ts_boot_us=111, can_id_with_flags=flagged_id, data=b"\x11")
+        self.db.commit(device_uid=42, device="alpha", records=[expected])
+        stored = list(self.db.get_records("alpha", [10], None, None))
+        self.assertEqual(1, len(stored))
+        self.assertEqual(flagged_id, stored[0].frame.can_id_with_flags)
+        self.assertEqual(0x12, stored[0].frame.can_id)
+        self.assertTrue(stored[0].frame.extended)
+        self.assertTrue(stored[0].frame.rtr)
+        self.assertTrue(stored[0].frame.error)
 
     def test_empty_commit_returns_cached_last_seqno(self) -> None:
         self.assertEqual(0, self.db.commit(device_uid=555, device="beta", records=[]))
@@ -857,7 +869,7 @@ class _DatabaseTests(unittest.TestCase):
     def test_commit_logs_uid_change_and_duplicate_seqnos_in_same_payload(self) -> None:
         self.db.commit(device_uid=100, device="alpha", records=[_make_record(1)])
 
-        duplicate = _make_record(2, boot_id=1, ts_boot_us=22, can_id=0x123, data=b"\x22")
+        duplicate = _make_record(2, boot_id=1, ts_boot_us=22, can_id_with_flags=0x123, data=b"\x22")
         with self.assertLogs(__name__, level="WARNING") as captured:
             latest = self.db.commit(device_uid=101, device="alpha", records=[duplicate, duplicate])
         self.assertEqual(2, latest)

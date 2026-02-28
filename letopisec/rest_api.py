@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, ClassVar
 from unittest.mock import patch
 
@@ -765,6 +766,34 @@ class _RestAPITests(unittest.TestCase):
             content=payload,
         )
 
+    @staticmethod
+    def _validation_dataset_path() -> Path:
+        return Path(__file__).resolve().parent.parent / "data" / "0000000.cf3d"
+
+    @classmethod
+    def _load_validation_dataset_blocks(cls) -> list[bytes]:
+        dataset_path = cls._validation_dataset_path()
+        if not dataset_path.exists():
+            raise RuntimeError(f"validation dataset is missing: {dataset_path}")
+        payload = dataset_path.read_bytes()
+        if len(payload) % RECORD_BYTES != 0:
+            raise RuntimeError(f"validation dataset byte size must be divisible by {RECORD_BYTES}: got {len(payload)}")
+        return [payload[offset : offset + RECORD_BYTES] for offset in range(0, len(payload), RECORD_BYTES)]
+
+    @classmethod
+    def _load_validation_dataset_records(cls) -> tuple[list[bytes], list[CANFrameRecord]]:
+        blocks = cls._load_validation_dataset_blocks()
+        records: list[CANFrameRecord] = []
+        for index, block in enumerate(blocks):
+            unboxed = unbox(block)
+            if not isinstance(unboxed, bytes):
+                raise RuntimeError(f"validation dataset block {index} decode failed: {unboxed!r}")
+            parsed = _parse_unboxed_commit_record(unboxed)
+            if parsed is None:
+                raise RuntimeError(f"validation dataset block {index} parse failed")
+            records.append(parsed)
+        return blocks, records
+
     def test_commit_empty_payload_returns_ack(self) -> None:
         response = self._post_commit()
         self.assertEqual(200, response.status_code)
@@ -787,6 +816,72 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(16, committed_uid)
         self.assertEqual("vehicle", committed_tag)
         self.assertEqual([expected], committed_records)
+
+    def test_validation_dataset_all_blocks_decode_and_parse(self) -> None:
+        blocks = self._load_validation_dataset_blocks()
+        self.assertGreater(len(blocks), 0, msg="validation dataset is unexpectedly empty")
+        parsed_records: list[CANFrameRecord] = []
+        for index, block in enumerate(blocks):
+            decoded = unbox(block)
+            self.assertIsInstance(decoded, bytes, msg=f"validation dataset block {index} failed to decode: {decoded!r}")
+            assert isinstance(decoded, bytes)
+
+            parsed = _parse_unboxed_commit_record(decoded)
+            self.assertIsNotNone(parsed, msg=f"validation dataset block {index} failed to parse")
+            assert parsed is not None
+            self.assertLessEqual(
+                len(bytes(parsed.frame.data)),
+                64,
+                msg=f"validation dataset block {index} has invalid payload length",
+            )
+            parsed_records.append(parsed)
+
+        expected_seqnos = list(range(len(parsed_records)))
+        self.assertEqual(expected_seqnos, [record.seqno for record in parsed_records])
+        self.assertEqual({0, 1, 2}, {record.boot_id for record in parsed_records})
+
+    def test_validation_dataset_commit_and_retrieve_with_real_database(self) -> None:
+        blocks, expected_records = self._load_validation_dataset_records()
+        payload = b"".join(blocks)
+        expected_records = sorted(expected_records, key=lambda record: record.seqno)
+        expected_seqnos = [record.seqno for record in expected_records]
+        expected_latest_seqno = expected_seqnos[-1]
+
+        with TestClient(create_app(SqliteDatabase())) as local_client:
+            commit_response = local_client.post(
+                "/cf3d/api/v1/commit",
+                params={"device_uid": "0x123", "device_tag": "validation-dataset"},
+                content=payload,
+            )
+            self.assertEqual(200, commit_response.status_code)
+            self.assertEqual(str(expected_latest_seqno), commit_response.text.splitlines()[0])
+
+            tags_response = local_client.get("/cf3d/api/v1/device-tags")
+            self.assertEqual(200, tags_response.status_code)
+            self.assertIn("validation-dataset", tags_response.json()["device_tags"])
+
+            boots_response = local_client.get("/cf3d/api/v1/boots", params={"device_tag": "validation-dataset"})
+            self.assertEqual(200, boots_response.status_code)
+            boot_ids = sorted(int(item["boot_id"]) for item in boots_response.json()["boots"])
+            self.assertEqual([0, 1, 2], boot_ids)
+
+            query_params: list[tuple[str, str]] = [("device_tag", "validation-dataset"), ("limit", "10000")]
+            query_params.extend(("boot_id", str(boot_id)) for boot_id in boot_ids)
+            records_response = local_client.get("/cf3d/api/v1/records", params=query_params)
+            self.assertEqual(200, records_response.status_code)
+            records_body = records_response.json()
+
+            returned_records = records_body["records"]
+            self.assertEqual(len(expected_records), records_body["total_matched"])
+            self.assertEqual(len(expected_records), len(returned_records))
+            self.assertEqual(expected_seqnos, [int(item["seqno"]) for item in returned_records])
+
+            first_expected = expected_records[0]
+            last_expected = expected_records[-1]
+            self.assertEqual(first_expected.frame.can_id, int(returned_records[0]["frame"]["can_id"]))
+            self.assertEqual(bytes(first_expected.frame.data).hex(), returned_records[0]["frame"]["data_hex"])
+            self.assertEqual(last_expected.frame.can_id, int(returned_records[-1]["frame"]["can_id"]))
+            self.assertEqual(bytes(last_expected.frame.data).hex(), returned_records[-1]["frame"]["data_hex"])
 
     def test_commit_partial_decode_failure_returns_207_with_ack_first_line(self) -> None:
         valid = self._make_record(seqno=5)

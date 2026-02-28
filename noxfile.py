@@ -6,8 +6,9 @@ import nox
 
 PACKAGE_DIR = Path("letopisec")
 EXCLUDED_TEST_FILE = "__main__.py"
+E2E_SCRIPT_PATH = Path("tools") / "e2e_test.py"
 
-nox.options.sessions = ("tests", "black", "mypy")
+nox.options.sessions = ("tests", "e2e", "black", "mypy")
 
 
 def _discover_test_modules() -> list[str]:
@@ -43,6 +44,14 @@ def tests(session: nox.Session) -> None:
         "*/letopisec/__main__.py",
         "--fail-under=80",
     )
+
+
+@nox.session
+def e2e(session: nox.Session) -> None:
+    session.install("httpx", ".")
+    if not E2E_SCRIPT_PATH.exists():
+        raise RuntimeError(f"E2E test script is missing: {E2E_SCRIPT_PATH}")
+    session.run("python", str(E2E_SCRIPT_PATH), external=True)
 
 
 @nox.session

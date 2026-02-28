@@ -22,6 +22,7 @@ import os
 import random
 import unittest
 from enum import Enum, auto
+from pathlib import Path
 
 N = 255
 K = 109
@@ -431,6 +432,35 @@ class _FECEnvelopeTests(unittest.TestCase):
         self.assertIsInstance(result, bytes)
         expected = text.encode("utf8") + b"\x00" * (USER_DATA_BYTES - len(text.encode("utf8")))
         self.assertEqual(expected, result)
+
+    def test_validation_dataset_all_blocks_decode(self) -> None:
+        dataset_path = Path(__file__).resolve().parent.parent / "data" / "0000000.cf3d"
+        self.assertTrue(dataset_path.exists(), msg=f"validation dataset is missing: {dataset_path}")
+
+        payload = dataset_path.read_bytes()
+        self.assertEqual(
+            0,
+            len(payload) % RECORD_BYTES,
+            msg=f"dataset byte size must be divisible by {RECORD_BYTES}: got {len(payload)}",
+        )
+
+        block_count = len(payload) // RECORD_BYTES
+        self.assertGreater(block_count, 0, msg="validation dataset is unexpectedly empty")
+        for index in range(block_count):
+            start = index * RECORD_BYTES
+            record = payload[start : start + RECORD_BYTES]
+            result = unbox(record)
+            self.assertIsInstance(
+                result,
+                bytes,
+                msg=f"dataset block {index} failed to decode: {result!r}",
+            )
+            assert isinstance(result, bytes)
+            self.assertEqual(
+                USER_DATA_BYTES,
+                len(result),
+                msg=f"dataset block {index} decoded to unexpected payload size: {len(result)}",
+            )
 
 
 if __name__ == "__main__":

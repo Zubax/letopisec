@@ -18,6 +18,8 @@ Run the server:
 letopisec serve  # See --help for extra info.
 ```
 
+Open the API docs at the `/docs` endpoint in your browser, e.g., <http://localhost:8000/docs>.
+
 Run behind a local gateway via Unix socket:
 
 ```bash

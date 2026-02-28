@@ -27,6 +27,13 @@ letopisec serve --uds /run/letopisec/letopisec.sock
 Every runtime option can be configured with env vars like `LETOPISEC_HOST`/`.._PORT`, `LETOPISEC_DB_PATH`, etc.
 CLI arguments override environment values.
 
+### Store and retrieve CAN frames
+
+Configure Zubax CANFace CF3D devices to use the endpoint where the server is running.
+Existing dumps from CF3D memory cards can also be uploaded manually using [`letopisec_ingest.py`](tools/letopisec_ingest.py).
+
+To retrieve data from the server, use [`letopisec_fetch.py`](tools/letopisec_fetch.py).
+
 ### Gateway integration
 
 You can run the ASGI app through an external process manager/gateway using the app factory:

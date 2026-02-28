@@ -17,7 +17,14 @@ from pydantic import BaseModel, Field
 
 from letopisec.database import Boot, Database, DeviceInfo, SqliteDatabase
 from letopisec.fec_envelope import RECORD_BYTES, USER_DATA_BYTES, UnboxError, box, unbox
-from letopisec.model import CAN_EFF_FLAG, CAN_ERR_FLAG, CAN_RTR_FLAG, CANFrame, CANFrameRecord
+from letopisec.model import (
+    CAN_EFF_FLAG,
+    CAN_ERR_FLAG,
+    CAN_RTR_FLAG,
+    CANFrame,
+    CANFrameRecord,
+    CANFrameRecordCommitted,
+)
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
@@ -47,6 +54,7 @@ class CANFrameRecordDTO(BaseModel):
     ts_boot_us: int = Field(description="Microseconds from device boot at frame capture")
     boot_id: int = Field(description="Device boot identifier")
     seqno: int = Field(description="Monotonic frame sequence number")
+    commit_ts: int = Field(description="Unix timestamp when this record was committed")
     frame: CANFrameDTO
 
 
@@ -96,11 +104,12 @@ def _serialize_frame(frame: CANFrame) -> CANFrameDTO:
     )
 
 
-def _serialize_record(record: CANFrameRecord) -> CANFrameRecordDTO:
+def _serialize_record(record: CANFrameRecordCommitted) -> CANFrameRecordDTO:
     return CANFrameRecordDTO(
         ts_boot_us=record.ts_boot_us,
         boot_id=record.boot_id,
         seqno=record.seqno,
+        commit_ts=record.commit_ts,
         frame=_serialize_frame(record.frame),
     )
 
@@ -361,6 +370,7 @@ def get_devices(
                                     "ts_boot_us": 10,
                                     "boot_id": 100,
                                     "seqno": 1,
+                                    "commit_ts": 1704067200,
                                     "frame": {
                                         "can_id": 291,
                                         "extended": False,
@@ -373,6 +383,7 @@ def get_devices(
                                     "ts_boot_us": 20,
                                     "boot_id": 100,
                                     "seqno": 2,
+                                    "commit_ts": 1704067201,
                                     "frame": {
                                         "can_id": 291,
                                         "extended": False,
@@ -440,7 +451,7 @@ def _query_records_once(
     boot_ids: list[int],
     seqno_min: int | None,
     seqno_max: int | None,
-) -> tuple[list[CANFrameRecord], int | None]:
+) -> tuple[list[CANFrameRecordCommitted], int | None]:
     records = list(database.get_records(device=device, boot_ids=boot_ids, seqno_min=seqno_min, seqno_max=seqno_max))
     records.sort(key=lambda record: record.seqno)
     latest_seqno_seen = records[-1].seqno if records else None
@@ -479,6 +490,7 @@ def _query_records_once(
                                 "ts_boot_us": 100,
                                 "boot_id": 1,
                                 "seqno": 10,
+                                "commit_ts": 1704067200,
                                 "frame": {
                                     "can_id": 291,
                                     "extended": False,
@@ -717,8 +729,8 @@ class _FakeDatabase(Database):
         self.commits: list[tuple[int, str, list[CANFrameRecord]]] = []
         self.devices: list[DeviceInfo] = []
         self.boots_by_device: dict[str, list[Boot]] = {}
-        self.records_by_device: dict[str, list[CANFrameRecord]] = {}
-        self.records_script_by_device: dict[str, list[list[CANFrameRecord]]] = {}
+        self.records_by_device: dict[str, list[CANFrameRecordCommitted]] = {}
+        self.records_script_by_device: dict[str, list[list[CANFrameRecordCommitted]]] = {}
         self.fail_methods: set[str] = set()
         self.last_get_boots_args: tuple[str, datetime | None, datetime | None] | None = None
         self.last_get_records_args: tuple[str, list[int], int | None, int | None] | None = None
@@ -745,7 +757,7 @@ class _FakeDatabase(Database):
 
     def get_records(
         self, device: str, boot_ids: Iterable[int], seqno_min: int | None, seqno_max: int | None
-    ) -> Iterable[CANFrameRecord]:
+    ) -> Iterable[CANFrameRecordCommitted]:
         if "get_records" in self.fail_methods:
             raise RuntimeError("forced records failure")
         boot_list = [int(boot_id) for boot_id in boot_ids]
@@ -761,16 +773,16 @@ class _FakeDatabase(Database):
 
     @staticmethod
     def _filter_records(
-        records: list[CANFrameRecord],
+        records: list[CANFrameRecordCommitted],
         boot_ids: list[int],
         seqno_min: int | None,
         seqno_max: int | None,
-    ) -> list[CANFrameRecord]:
+    ) -> list[CANFrameRecordCommitted]:
         if seqno_min is not None and seqno_max is not None and seqno_min > seqno_max:
             return []
 
         boot_id_set = set(int(boot_id) for boot_id in boot_ids)
-        out: list[CANFrameRecord] = []
+        out: list[CANFrameRecordCommitted] = []
         for record in records:
             if record.boot_id not in boot_id_set:
                 continue
@@ -817,6 +829,31 @@ class _RestAPITests(unittest.TestCase):
             boot_id=boot_id,
             seqno=seqno,
             frame=CANFrame(can_id_with_flags=can_id_with_flags, data=data),
+        )
+
+    @staticmethod
+    def _make_committed_record(
+        seqno: int = 1,
+        *,
+        boot_id: int = 1001,
+        ts_boot_us: int = 5_000,
+        can_id_with_flags: int = 0x123,
+        data: bytes = b"\x01\x02",
+        commit_ts: int = 1704067200,
+    ) -> CANFrameRecordCommitted:
+        base = _RestAPITests._make_record(
+            seqno=seqno,
+            boot_id=boot_id,
+            ts_boot_us=ts_boot_us,
+            can_id_with_flags=can_id_with_flags,
+            data=data,
+        )
+        return CANFrameRecordCommitted(
+            ts_boot_us=base.ts_boot_us,
+            boot_id=base.boot_id,
+            seqno=base.seqno,
+            commit_ts=commit_ts,
+            frame=base.frame,
         )
 
     def _post_commit(
@@ -940,8 +977,11 @@ class _RestAPITests(unittest.TestCase):
 
             boots_response = local_client.get("/cf3d/api/v1/boots", params={"device": "validation-dataset"})
             self.assertEqual(200, boots_response.status_code)
-            boot_ids = sorted(int(item["boot_id"]) for item in boots_response.json()["boots"])
+            boots_body = boots_response.json()
+            boot_ids = sorted(int(item["boot_id"]) for item in boots_body["boots"])
             self.assertEqual([0, 1, 2], boot_ids)
+            self.assertTrue(all(int(item["first_record"]["commit_ts"]) > 0 for item in boots_body["boots"]))
+            self.assertTrue(all(int(item["last_record"]["commit_ts"]) > 0 for item in boots_body["boots"]))
 
             query_params: list[tuple[str, str | int | float | bool | None]] = [
                 ("device", "validation-dataset"),
@@ -955,6 +995,7 @@ class _RestAPITests(unittest.TestCase):
             returned_records = records_body["records"]
             self.assertEqual(len(expected_records), len(returned_records))
             self.assertEqual(expected_seqnos, [int(item["seqno"]) for item in returned_records])
+            self.assertTrue(all(int(item["commit_ts"]) > 0 for item in returned_records))
 
             first_expected = expected_records[0]
             last_expected = expected_records[-1]
@@ -1141,8 +1182,22 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(500, response.status_code)
 
     def test_get_boots_returns_json(self) -> None:
-        first = self._make_record(seqno=10, boot_id=7, ts_boot_us=1, can_id_with_flags=0x100, data=b"\xaa")
-        last = self._make_record(seqno=20, boot_id=7, ts_boot_us=2, can_id_with_flags=0x200, data=b"\xbb")
+        first = self._make_committed_record(
+            seqno=10,
+            boot_id=7,
+            ts_boot_us=1,
+            can_id_with_flags=0x100,
+            data=b"\xaa",
+            commit_ts=1704067200,
+        )
+        last = self._make_committed_record(
+            seqno=20,
+            boot_id=7,
+            ts_boot_us=2,
+            can_id_with_flags=0x200,
+            data=b"\xbb",
+            commit_ts=1704067201,
+        )
         self.database.boots_by_device["alpha"] = [Boot(boot_id=7, first_record=first, last_record=last)]
 
         response = self.client.get("/cf3d/api/v1/boots", params={"device": "alpha"})
@@ -1152,6 +1207,8 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual(1, len(body["boots"]))
         self.assertEqual("aa", body["boots"][0]["first_record"]["frame"]["data_hex"])
         self.assertEqual("bb", body["boots"][0]["last_record"]["frame"]["data_hex"])
+        self.assertEqual(1704067200, int(body["boots"][0]["first_record"]["commit_ts"]))
+        self.assertEqual(1704067201, int(body["boots"][0]["last_record"]["commit_ts"]))
         self.assertFalse(body["boots"][0]["first_record"]["frame"]["extended"])
         self.assertFalse(body["boots"][0]["first_record"]["frame"]["rtr"])
         self.assertFalse(body["boots"][0]["first_record"]["frame"]["error"])
@@ -1193,9 +1250,9 @@ class _RestAPITests(unittest.TestCase):
 
     def test_get_records_returns_limited_first_page_results(self) -> None:
         self.database.records_by_device["alpha"] = [
-            self._make_record(seqno=1, boot_id=1, data=b"\x01"),
-            self._make_record(seqno=2, boot_id=1, data=b"\x02"),
-            self._make_record(seqno=3, boot_id=1, data=b"\x03"),
+            self._make_committed_record(seqno=1, boot_id=1, data=b"\x01", commit_ts=1704067200),
+            self._make_committed_record(seqno=2, boot_id=1, data=b"\x02", commit_ts=1704067201),
+            self._make_committed_record(seqno=3, boot_id=1, data=b"\x03", commit_ts=1704067202),
         ]
 
         response = self.client.get(
@@ -1212,6 +1269,7 @@ class _RestAPITests(unittest.TestCase):
         self.assertTrue(all(item["frame"]["extended"] is False for item in body["records"]))
         self.assertTrue(all(item["frame"]["rtr"] is False for item in body["records"]))
         self.assertTrue(all(item["frame"]["error"] is False for item in body["records"]))
+        self.assertEqual([1704067200, 1704067201], [int(item["commit_ts"]) for item in body["records"]])
         self.assertNotIn("offset", body["filters"])
         self.assertNotIn("total_matched", body)
         self.assertNotIn("timed_out", body)
@@ -1219,7 +1277,13 @@ class _RestAPITests(unittest.TestCase):
     def test_get_records_serializes_flags_for_flagged_frame(self) -> None:
         flagged_id = CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_ERR_FLAG | 0x1ABC
         self.database.records_by_device["alpha"] = [
-            self._make_record(seqno=10, boot_id=1, can_id_with_flags=flagged_id, data=b"\xfa\xce"),
+            self._make_committed_record(
+                seqno=10,
+                boot_id=1,
+                can_id_with_flags=flagged_id,
+                data=b"\xfa\xce",
+                commit_ts=1704067200,
+            ),
         ]
         response = self.client.get(
             "/cf3d/api/v1/records",
@@ -1234,6 +1298,7 @@ class _RestAPITests(unittest.TestCase):
         self.assertTrue(frame["rtr"])
         self.assertTrue(frame["error"])
         self.assertEqual("face", frame["data_hex"])
+        self.assertEqual(1704067200, int(body["records"][0]["commit_ts"]))
 
     def test_get_records_unknown_tag_returns_empty(self) -> None:
         response = self.client.get("/cf3d/api/v1/records", params={"device": "unknown", "boot_id": 1})
@@ -1256,9 +1321,9 @@ class _RestAPITests(unittest.TestCase):
 
     def test_get_records_seqno_min_filters_results(self) -> None:
         self.database.records_by_device["alpha"] = [
-            self._make_record(seqno=1, boot_id=1),
-            self._make_record(seqno=2, boot_id=1),
-            self._make_record(seqno=3, boot_id=1),
+            self._make_committed_record(seqno=1, boot_id=1, commit_ts=1704067200),
+            self._make_committed_record(seqno=2, boot_id=1, commit_ts=1704067201),
+            self._make_committed_record(seqno=3, boot_id=1, commit_ts=1704067202),
         ]
         response = self.client.get(
             "/cf3d/api/v1/records",
@@ -1270,9 +1335,9 @@ class _RestAPITests(unittest.TestCase):
 
     def test_get_records_seqno_min_resumes_after_last_returned_record(self) -> None:
         self.database.records_by_device["alpha"] = [
-            self._make_record(seqno=1, boot_id=1),
-            self._make_record(seqno=2, boot_id=1),
-            self._make_record(seqno=3, boot_id=1),
+            self._make_committed_record(seqno=1, boot_id=1, commit_ts=1704067200),
+            self._make_committed_record(seqno=2, boot_id=1, commit_ts=1704067201),
+            self._make_committed_record(seqno=3, boot_id=1, commit_ts=1704067202),
         ]
 
         first = self.client.get(
@@ -1292,7 +1357,7 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual([3], [item["seqno"] for item in second_body["records"]])
 
     def test_get_records_long_poll_wakes_when_new_data_appears(self) -> None:
-        wake_record = self._make_record(seqno=9, boot_id=1)
+        wake_record = self._make_committed_record(seqno=9, boot_id=1, commit_ts=1704067200)
         self.database.records_script_by_device["alpha"] = [[], [wake_record]]
 
         with patch("letopisec.rest_api.WAIT_POLL_INTERVAL_S", 0.01):

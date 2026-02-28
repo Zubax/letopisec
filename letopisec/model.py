@@ -22,6 +22,12 @@ class CANFrameRecord:
 
 
 @dataclass(frozen=True)
+class CANFrameRecordCommitted(CANFrameRecord):
+    commit_ts: int
+    """Unix timestamp when committed."""
+
+
+@dataclass(frozen=True)
 class CANFrame:
     can_id_with_flags: int
     data: bytes | bytearray

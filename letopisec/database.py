@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from letopisec.model import CANFrame, CANFrameRecord
+from letopisec.model import CANFrame, CANFrameRecord, CANFrameRecordCommitted
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,14 +25,15 @@ class Boot:
     """
 
     boot_id: int
-    first_record: CANFrameRecord
-    last_record: CANFrameRecord
+    first_record: CANFrameRecordCommitted
+    last_record: CANFrameRecordCommitted
 
 
 @dataclass(frozen=True)
 class DeviceInfo:
     device: str
     last_heard_ts: int
+    """Unix timestamp when last request seen from this device."""
     last_uid: int
 
 
@@ -60,7 +61,7 @@ class Database(ABC):
     @abstractmethod
     def get_records(
         self, device: str, boot_ids: Iterable[int], seqno_min: int | None, seqno_max: int | None
-    ) -> Iterable[CANFrameRecord]:
+    ) -> Iterable[CANFrameRecordCommitted]:
         raise NotImplementedError
 
 
@@ -346,11 +347,13 @@ class SqliteDatabase(Database):
                     first_frame.ts_boot_us,
                     first_frame.boot_id,
                     first_frame.seqno,
+                    first_frame.commit_ts,
                     first_frame.can_id_with_flags,
                     first_frame.data,
                     last_frame.ts_boot_us,
                     last_frame.boot_id,
                     last_frame.seqno,
+                    last_frame.commit_ts,
                     last_frame.can_id_with_flags,
                     last_frame.data
                 FROM
@@ -390,22 +393,24 @@ class SqliteDatabase(Database):
 
             out: list[Boot] = []
             for row in cursor.fetchall():
-                first_record = CANFrameRecord(
+                first_record = CANFrameRecordCommitted(
                     ts_boot_us=int(row[1]),
                     boot_id=int(row[2]),
                     seqno=int(row[3]),
+                    commit_ts=int(row[4]),
                     frame=CANFrame(
-                        can_id_with_flags=int(row[4]),
-                        data=bytes(row[5]),
+                        can_id_with_flags=int(row[5]),
+                        data=bytes(row[6]),
                     ),
                 )
-                last_record = CANFrameRecord(
-                    ts_boot_us=int(row[6]),
-                    boot_id=int(row[7]),
-                    seqno=int(row[8]),
+                last_record = CANFrameRecordCommitted(
+                    ts_boot_us=int(row[7]),
+                    boot_id=int(row[8]),
+                    seqno=int(row[9]),
+                    commit_ts=int(row[10]),
                     frame=CANFrame(
-                        can_id_with_flags=int(row[9]),
-                        data=bytes(row[10]),
+                        can_id_with_flags=int(row[11]),
+                        data=bytes(row[12]),
                     ),
                 )
                 out.append(Boot(boot_id=int(row[0]), first_record=first_record, last_record=last_record))
@@ -420,7 +425,7 @@ class SqliteDatabase(Database):
 
     def get_records(
         self, device: str, boot_ids: Iterable[int], seqno_min: int | None, seqno_max: int | None
-    ) -> Iterable[CANFrameRecord]:
+    ) -> Iterable[CANFrameRecordCommitted]:
         if seqno_min is not None and seqno_max is not None and seqno_min > seqno_max:
             LOGGER.warning(
                 "Requested invalid seqno range for device=%r: seqno_min=%d > seqno_max=%d",
@@ -449,11 +454,11 @@ class SqliteDatabase(Database):
                 LOGGER.info("No data for unknown device=%r", device)
                 return []
 
-            result: list[CANFrameRecord] = []
+            result: list[CANFrameRecordCommitted] = []
             for boot_id_chunk in _chunked(unique_boot_ids, self._SQL_VARIABLE_CHUNK):
                 placeholders = ",".join("?" for _ in boot_id_chunk)
                 query = (
-                    "SELECT ts_boot_us, boot_id, seqno, can_id_with_flags, data "
+                    "SELECT ts_boot_us, boot_id, seqno, commit_ts, can_id_with_flags, data "
                     "FROM can_frames "
                     f"WHERE device_id=? AND boot_id IN ({placeholders})"
                 )
@@ -470,13 +475,14 @@ class SqliteDatabase(Database):
                 cursor.execute(query, parameters)
                 for row in cursor.fetchall():
                     result.append(
-                        CANFrameRecord(
+                        CANFrameRecordCommitted(
                             ts_boot_us=int(row[0]),
                             boot_id=int(row[1]),
                             seqno=int(row[2]),
+                            commit_ts=int(row[3]),
                             frame=CANFrame(
-                                can_id_with_flags=int(row[3]),
-                                data=bytes(row[4]),
+                                can_id_with_flags=int(row[4]),
+                                data=bytes(row[5]),
                             ),
                         )
                     )
@@ -770,6 +776,7 @@ class _DatabaseTests(unittest.TestCase):
         selected = list(self.db.get_records("alpha", [2], 3, 5))
         self.assertEqual([3, 4, 5], [record.seqno for record in selected])
         self.assertEqual([2, 2, 2], [record.boot_id for record in selected])
+        self.assertTrue(all(record.commit_ts > 0 for record in selected))
 
     def test_get_boots_uses_overlap_time_window(self) -> None:
         records = [
@@ -810,6 +817,8 @@ class _DatabaseTests(unittest.TestCase):
         self.assertEqual(100, boots[0].boot_id)
         self.assertEqual(1, boots[0].first_record.seqno)
         self.assertEqual(2, boots[0].last_record.seqno)
+        self.assertEqual(_datetime_to_epoch_seconds(datetime(2024, 1, 1, 0, 0, 0)), boots[0].first_record.commit_ts)
+        self.assertEqual(_datetime_to_epoch_seconds(datetime(2024, 1, 1, 2, 0, 0)), boots[0].last_record.commit_ts)
 
     def test_file_backed_database_persists_data(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -843,7 +852,7 @@ class _DatabaseTests(unittest.TestCase):
 
             def get_records(
                 self, device: str, boot_ids: Iterable[int], seqno_min: int | None, seqno_max: int | None
-            ) -> Iterable[CANFrameRecord]:
+            ) -> Iterable[CANFrameRecordCommitted]:
                 return []
 
         probe = _Probe()

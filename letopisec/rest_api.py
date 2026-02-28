@@ -5,11 +5,12 @@ import logging
 import struct
 import unittest
 from collections.abc import Iterable, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Any, ClassVar
 from unittest.mock import patch
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
@@ -23,9 +24,8 @@ WAIT_POLL_INTERVAL_S = 0.25
 RECORDS_DEFAULT_LIMIT = 1000
 RECORDS_MAX_LIMIT = 10000
 
-app = FastAPI()
 LOGGER = logging.getLogger(__name__)
-_DATABASE = SqliteDatabase()
+router = APIRouter()
 
 
 class ErrorResponse(BaseModel):
@@ -111,11 +111,18 @@ def _parse_device_uid(
         ) from ex
 
 
-def get_database() -> Database:
-    return _DATABASE
+def get_database(request: Request) -> Database:
+    database = getattr(request.app.state, "database", None)
+    if not isinstance(database, Database):
+        LOGGER.critical(
+            "Application database dependency is invalid: type=%s",
+            None if database is None else type(database).__name__,
+        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal server error")
+    return database
 
 
-@app.post(
+@router.post(
     "/cf3d/api/v1/commit",
     response_class=PlainTextResponse,
     tags=["commit"],
@@ -243,7 +250,7 @@ async def commit(
     return PlainTextResponse(content="\n".join(body_lines), status_code=response_status)
 
 
-@app.get(
+@router.get(
     "/cf3d/api/v1/device-tags",
     response_model=DeviceTagsResponse,
     tags=["query"],
@@ -270,7 +277,7 @@ def get_device_tags(
     return DeviceTagsResponse(device_tags=tags)
 
 
-@app.get(
+@router.get(
     "/cf3d/api/v1/boots",
     response_model=BootsResponse,
     tags=["query"],
@@ -315,7 +322,7 @@ def get_boots(
     device_tag: Annotated[str, Query(min_length=1, description="Device tag")],
     earliest_commit: Annotated[datetime | None, Query(description="Lower commit-time bound (ISO-8601)")] = None,
     latest_commit: Annotated[datetime | None, Query(description="Upper commit-time bound (ISO-8601)")] = None,
-    database: Annotated[Database, Depends(get_database)] = _DATABASE,
+    database: Database = Depends(get_database),
 ) -> BootsResponse:
     LOGGER.debug(
         "Boots query request: device_tag=%r earliest_commit=%r latest_commit=%r",
@@ -378,7 +385,7 @@ def _query_records_once(
     return records, latest_seqno_seen
 
 
-@app.get(
+@router.get(
     "/cf3d/api/v1/records",
     response_model=RecordsResponse,
     tags=["query"],
@@ -436,7 +443,7 @@ async def get_records(
     ] = 0,
     limit: Annotated[int, Query(ge=1, le=RECORDS_MAX_LIMIT, description="Page size")] = RECORDS_DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0, description="Pagination offset")] = 0,
-    database: Annotated[Database, Depends(get_database)] = _DATABASE,
+    database: Database = Depends(get_database),
 ) -> RecordsResponse:
     boot_ids = sorted(set(int(value) for value in boot_id))
     effective_seqno_min = _resolve_effective_seqno_min(seqno_min, after_seqno)
@@ -614,6 +621,35 @@ def _pack_unboxed_commit_record_v0(record: CANFrameRecord) -> bytes:
     return bytes(out)
 
 
+def _close_database(database: Database) -> None:
+    close_method = getattr(database, "close", None)
+    if not callable(close_method):
+        LOGGER.debug("Database does not expose close(); skipping shutdown close for %s", type(database).__name__)
+        return
+    try:
+        close_method()
+        LOGGER.info("Database closed cleanly during app shutdown: type=%s", type(database).__name__)
+    except Exception:
+        LOGGER.error("Failed to close database during app shutdown: type=%s", type(database).__name__, exc_info=True)
+
+
+def create_app(database: Database) -> FastAPI:
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            LOGGER.info("REST API app shutdown event received")
+            _close_database(database)
+
+    created_app = FastAPI(lifespan=_lifespan)
+    created_app.state.database = database
+    created_app.include_router(router)
+
+    LOGGER.info("REST API app created with database backend=%s", type(database).__name__)
+    return created_app
+
+
 class _FakeDatabase(Database):
     def __init__(self, ack_seqno: int = 0) -> None:
         self._ack_seqno = ack_seqno
@@ -687,18 +723,24 @@ class _FakeDatabase(Database):
 
 
 class _RestAPITests(unittest.TestCase):
+    app: ClassVar[FastAPI]
     client: ClassVar[TestClient]
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.client = TestClient(app)
+        cls.app = create_app(SqliteDatabase())
+        cls.client = TestClient(cls.app)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client.close()
 
     def setUp(self) -> None:
         self.database = _FakeDatabase(ack_seqno=321)
-        app.dependency_overrides[get_database] = lambda: self.database
+        self.app.dependency_overrides[get_database] = lambda: self.database
 
     def tearDown(self) -> None:
-        app.dependency_overrides.clear()
+        self.app.dependency_overrides.clear()
 
     @staticmethod
     def _make_record(

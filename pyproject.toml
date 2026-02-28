@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi~=0.134.0",
+    "uvicorn>=0.30,<1.0",
 ]
 authors = [
     { name = "Zubax Robotics", email = "accelerationism@zubax.com" },
@@ -20,6 +21,9 @@ packages = ["letopisec"]
 
 [tool.setuptools.dynamic]
 version = { attr = "letopisec.__version__" }
+
+[project.scripts]
+letopisec = "letopisec.__main__:main"
 
 [tool.black]
 line-length = 120

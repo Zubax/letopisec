@@ -79,9 +79,7 @@ class RecordsFilterEcho(BaseModel):
 class RecordsResponse(BaseModel):
     device: str
     filters: RecordsFilterEcho
-    total_matched: int
     latest_seqno_seen: int | None
-    timed_out: bool
     records: list[CANFrameRecordDTO]
 
 
@@ -449,9 +447,7 @@ def _query_records_once(
                             "wait_timeout_s": 0,
                             "limit": 1000,
                         },
-                        "total_matched": 1,
                         "latest_seqno_seen": 10,
-                        "timed_out": False,
                         "records": [
                             {
                                 "ts_boot_us": 100,
@@ -508,9 +504,7 @@ async def get_records(
         return RecordsResponse(
             device=device,
             filters=filters,
-            total_matched=0,
             latest_seqno_seen=None,
-            timed_out=False,
             records=[],
         )
 
@@ -550,9 +544,7 @@ async def get_records(
                 return RecordsResponse(
                     device=device,
                     filters=filters,
-                    total_matched=total_matched,
                     latest_seqno_seen=latest_seqno_seen,
-                    timed_out=False,
                     records=serialized,
                 )
 
@@ -575,9 +567,7 @@ async def get_records(
                 return RecordsResponse(
                     device=device,
                     filters=filters,
-                    total_matched=0,
                     latest_seqno_seen=latest_seqno_seen,
-                    timed_out=timed_out,
                     records=[],
                 )
 
@@ -925,7 +915,6 @@ class _RestAPITests(unittest.TestCase):
             records_body = records_response.json()
 
             returned_records = records_body["records"]
-            self.assertEqual(len(expected_records), records_body["total_matched"])
             self.assertEqual(len(expected_records), len(returned_records))
             self.assertEqual(expected_seqnos, [int(item["seqno"]) for item in returned_records])
 
@@ -1141,19 +1130,19 @@ class _RestAPITests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertEqual(3, body["total_matched"])
         self.assertEqual(2, len(body["records"]))
         self.assertEqual([1, 2], [item["seqno"] for item in body["records"]])
         self.assertNotIn("offset", body["filters"])
-        self.assertFalse(body["timed_out"])
+        self.assertNotIn("total_matched", body)
+        self.assertNotIn("timed_out", body)
 
     def test_get_records_unknown_tag_returns_empty(self) -> None:
         response = self.client.get("/cf3d/api/v1/records", params={"device": "unknown", "boot_id": 1})
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertEqual(0, body["total_matched"])
         self.assertEqual([], body["records"])
-        self.assertFalse(body["timed_out"])
+        self.assertNotIn("total_matched", body)
+        self.assertNotIn("timed_out", body)
 
     def test_get_records_invalid_range_returns_empty_200(self) -> None:
         response = self.client.get(
@@ -1162,9 +1151,9 @@ class _RestAPITests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertEqual(0, body["total_matched"])
         self.assertEqual([], body["records"])
-        self.assertFalse(body["timed_out"])
+        self.assertNotIn("total_matched", body)
+        self.assertNotIn("timed_out", body)
 
     def test_get_records_seqno_min_filters_results(self) -> None:
         self.database.records_by_device["alpha"] = [
@@ -1178,7 +1167,6 @@ class _RestAPITests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertEqual(1, body["total_matched"])
         self.assertEqual([3], [item["seqno"] for item in body["records"]])
 
     def test_get_records_seqno_min_resumes_after_last_returned_record(self) -> None:
@@ -1215,11 +1203,11 @@ class _RestAPITests(unittest.TestCase):
             )
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertFalse(body["timed_out"])
         self.assertEqual([9], [item["seqno"] for item in body["records"]])
+        self.assertNotIn("timed_out", body)
         self.assertGreaterEqual(self.database.get_records_call_count, 2)
 
-    def test_get_records_long_poll_timeout_returns_timed_out_true(self) -> None:
+    def test_get_records_long_poll_timeout_returns_empty_without_timed_out_field(self) -> None:
         self.database.records_script_by_device["alpha"] = [[], [], [], []]
 
         with patch("letopisec.rest_api.WAIT_POLL_INTERVAL_S", 0.01):
@@ -1229,8 +1217,8 @@ class _RestAPITests(unittest.TestCase):
             )
         self.assertEqual(200, response.status_code)
         body = response.json()
-        self.assertTrue(body["timed_out"])
         self.assertEqual([], body["records"])
+        self.assertNotIn("timed_out", body)
 
     def test_get_records_wait_timeout_validation(self) -> None:
         response = self.client.get(

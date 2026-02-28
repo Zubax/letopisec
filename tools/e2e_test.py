@@ -263,14 +263,9 @@ def run(argv: list[str] | None = None) -> int:
                 query_items: list[tuple[str, str]] = [("device", device), ("limit", "10000")]
                 query_items.extend(("boot_id", str(boot_id)) for boot_id in boot_ids)
                 records_body = _http_get_json(f"{base_url}/cf3d/api/v1/records?{urlencode(query_items, doseq=True)}")
-                total_matched = int(records_body.get("total_matched", -1))
                 latest_seqno_seen = int(records_body.get("latest_seqno_seen", -1))
                 records = list(records_body.get("records", []))
 
-                if total_matched != expected_records:
-                    raise AssertionError(
-                        f"unexpected total_matched={total_matched}, expected={expected_records}, boot_ids={boot_ids}"
-                    )
                 if len(records) != expected_records:
                     raise AssertionError(
                         f"unexpected returned records count={len(records)}, expected={expected_records}, boot_ids={boot_ids}"
@@ -280,12 +275,7 @@ def run(argv: list[str] | None = None) -> int:
                         f"unexpected latest_seqno_seen={latest_seqno_seen}, expected={expected_records - 1}"
                     )
 
-                LOGGER.info(
-                    "E2E verification succeeded: total_matched=%d latest_seqno_seen=%d boot_ids=%s",
-                    total_matched,
-                    latest_seqno_seen,
-                    boot_ids,
-                )
+                LOGGER.info("E2E verification succeeded: latest_seqno_seen=%d boot_ids=%s", latest_seqno_seen, boot_ids)
                 return 0
             except Exception:
                 # Emit concise but high-value diagnostics so CI failures can be triaged quickly.

@@ -12,7 +12,7 @@ CAN_ID_EXT_MASK = 0x1FFFFFFF
 
 @dataclass(frozen=True)
 class CANFrameRecord:
-    ts_boot_us: int
+    hw_ts_us: int
     """Time in microseconds from device bootup to frame capture."""
     boot_id: int
     """Sequential boot count; incremented each bootup."""

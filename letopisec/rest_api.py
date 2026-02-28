@@ -51,7 +51,7 @@ class CANFrameDTO(BaseModel):
 
 
 class CANFrameRecordDTO(BaseModel):
-    ts_boot_us: int = Field(description="Microseconds from device boot at frame capture")
+    hw_ts_us: int = Field(description="Microseconds from device boot at frame capture")
     boot_id: int = Field(description="Device boot identifier")
     seqno: int = Field(description="Monotonic frame sequence number")
     commit_ts: int = Field(description="Unix timestamp when this record was committed")
@@ -106,7 +106,7 @@ def _serialize_frame(frame: CANFrame) -> CANFrameDTO:
 
 def _serialize_record(record: CANFrameRecordCommitted) -> CANFrameRecordDTO:
     return CANFrameRecordDTO(
-        ts_boot_us=record.ts_boot_us,
+        hw_ts_us=record.hw_ts_us,
         boot_id=record.boot_id,
         seqno=record.seqno,
         commit_ts=record.commit_ts,
@@ -367,7 +367,7 @@ def get_devices(
                             {
                                 "boot_id": 100,
                                 "first_record": {
-                                    "ts_boot_us": 10,
+                                    "hw_ts_us": 10,
                                     "boot_id": 100,
                                     "seqno": 1,
                                     "commit_ts": 1704067200,
@@ -380,7 +380,7 @@ def get_devices(
                                     },
                                 },
                                 "last_record": {
-                                    "ts_boot_us": 20,
+                                    "hw_ts_us": 20,
                                     "boot_id": 100,
                                     "seqno": 2,
                                     "commit_ts": 1704067201,
@@ -487,7 +487,7 @@ def _query_records_once(
                         "latest_seqno_seen": 10,
                         "records": [
                             {
-                                "ts_boot_us": 100,
+                                "hw_ts_us": 100,
                                 "boot_id": 1,
                                 "seqno": 10,
                                 "commit_ts": 1704067200,
@@ -663,7 +663,7 @@ def _parse_unboxed_commit_record(buf: bytes | bytearray | memoryview) -> CANFram
 
     data = bytes(mv[41:total_len])
     return CANFrameRecord(
-        ts_boot_us=int(timestamp_us),
+        hw_ts_us=int(timestamp_us),
         boot_id=int(boot_id),
         seqno=int(seqno),
         frame=CANFrame(can_id_with_flags=int(can_id_with_flags), data=data),
@@ -677,7 +677,7 @@ def _pack_unboxed_commit_record_v0(record: CANFrameRecord) -> bytes:
 
     out = bytearray(USER_DATA_BYTES)
     out[0] = 0
-    struct.pack_into("<QQQ", out, 8, record.boot_id, record.seqno, record.ts_boot_us)
+    struct.pack_into("<QQQ", out, 8, record.boot_id, record.seqno, record.hw_ts_us)
     struct.pack_into("<I", out, 36, record.frame.can_id_with_flags)
     out[40] = len(data)
     out[41 : 41 + len(data)] = data
@@ -820,12 +820,12 @@ class _RestAPITests(unittest.TestCase):
         seqno: int = 1,
         *,
         boot_id: int = 1001,
-        ts_boot_us: int = 5_000,
+        hw_ts_us: int = 5_000,
         can_id_with_flags: int = 0x123,
         data: bytes = b"\x01\x02",
     ) -> CANFrameRecord:
         return CANFrameRecord(
-            ts_boot_us=ts_boot_us,
+            hw_ts_us=hw_ts_us,
             boot_id=boot_id,
             seqno=seqno,
             frame=CANFrame(can_id_with_flags=can_id_with_flags, data=data),
@@ -836,7 +836,7 @@ class _RestAPITests(unittest.TestCase):
         seqno: int = 1,
         *,
         boot_id: int = 1001,
-        ts_boot_us: int = 5_000,
+        hw_ts_us: int = 5_000,
         can_id_with_flags: int = 0x123,
         data: bytes = b"\x01\x02",
         commit_ts: int = 1704067200,
@@ -844,12 +844,12 @@ class _RestAPITests(unittest.TestCase):
         base = _RestAPITests._make_record(
             seqno=seqno,
             boot_id=boot_id,
-            ts_boot_us=ts_boot_us,
+            hw_ts_us=hw_ts_us,
             can_id_with_flags=can_id_with_flags,
             data=data,
         )
         return CANFrameRecordCommitted(
-            ts_boot_us=base.ts_boot_us,
+            hw_ts_us=base.hw_ts_us,
             boot_id=base.boot_id,
             seqno=base.seqno,
             commit_ts=commit_ts,
@@ -917,7 +917,7 @@ class _RestAPITests(unittest.TestCase):
         expected = self._make_record(
             seqno=42,
             boot_id=7,
-            ts_boot_us=123456,
+            hw_ts_us=123456,
             can_id_with_flags=0x1ABCDEFF,
             data=b"\xaa\xbb",
         )
@@ -1066,7 +1066,7 @@ class _RestAPITests(unittest.TestCase):
         expected = self._make_record(
             seqno=777,
             boot_id=17,
-            ts_boot_us=987654321,
+            hw_ts_us=987654321,
             can_id_with_flags=0x123,
             data=b"\x11\x22\x33",
         )
@@ -1077,7 +1077,7 @@ class _RestAPITests(unittest.TestCase):
         flagged = self._make_record(
             seqno=778,
             boot_id=18,
-            ts_boot_us=123456789,
+            hw_ts_us=123456789,
             can_id_with_flags=(CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_ERR_FLAG | 0x12),
             data=b"\x44\x55",
         )
@@ -1185,7 +1185,7 @@ class _RestAPITests(unittest.TestCase):
         first = self._make_committed_record(
             seqno=10,
             boot_id=7,
-            ts_boot_us=1,
+            hw_ts_us=1,
             can_id_with_flags=0x100,
             data=b"\xaa",
             commit_ts=1704067200,
@@ -1193,7 +1193,7 @@ class _RestAPITests(unittest.TestCase):
         last = self._make_committed_record(
             seqno=20,
             boot_id=7,
-            ts_boot_us=2,
+            hw_ts_us=2,
             can_id_with_flags=0x200,
             data=b"\xbb",
             commit_ts=1704067201,

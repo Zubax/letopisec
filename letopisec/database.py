@@ -68,7 +68,7 @@ class Database(ABC):
 @dataclass(frozen=True)
 class _StoredFrameRow:
     device_uid: int
-    ts_boot_us: int
+    hw_ts_us: int
     boot_id: int
     can_id_with_flags: int
     data: bytes
@@ -163,7 +163,7 @@ class SqliteDatabase(Database):
                         (
                             device_uid,
                             device_id,
-                            record.ts_boot_us,
+                            record.hw_ts_us,
                             record.boot_id,
                             record.seqno,
                             record.frame.can_id_with_flags,
@@ -189,7 +189,7 @@ class SqliteDatabase(Database):
                     (
                         device_uid,
                         device_id,
-                        ts_boot_us,
+                        hw_ts_us,
                         boot_id,
                         seqno,
                         can_id_with_flags,
@@ -228,18 +228,18 @@ class SqliteDatabase(Database):
                             mismatch_count += 1
                             LOGGER.warning(
                                 "Duplicate seqno mismatch for device=%r seqno=%d "
-                                "stored(device_uid=%d boot_id=%d ts_boot_us=%d can_id_with_flags=%d data=%s) "
-                                "incoming(device_uid=%d boot_id=%d ts_boot_us=%d can_id_with_flags=%d data=%s)",
+                                "stored(device_uid=%d boot_id=%d hw_ts_us=%d can_id_with_flags=%d data=%s) "
+                                "incoming(device_uid=%d boot_id=%d hw_ts_us=%d can_id_with_flags=%d data=%s)",
                                 device,
                                 seqno,
                                 stored.device_uid,
                                 stored.boot_id,
-                                stored.ts_boot_us,
+                                stored.hw_ts_us,
                                 stored.can_id_with_flags,
                                 stored.data.hex(),
                                 device_uid,
                                 record.boot_id,
-                                record.ts_boot_us,
+                                record.hw_ts_us,
                                 record.frame.can_id_with_flags,
                                 bytes(record.frame.data).hex(),
                             )
@@ -344,13 +344,13 @@ class SqliteDatabase(Database):
                 """
                 SELECT
                     grouped.boot_id,
-                    first_frame.ts_boot_us,
+                    first_frame.hw_ts_us,
                     first_frame.boot_id,
                     first_frame.seqno,
                     first_frame.commit_ts,
                     first_frame.can_id_with_flags,
                     first_frame.data,
-                    last_frame.ts_boot_us,
+                    last_frame.hw_ts_us,
                     last_frame.boot_id,
                     last_frame.seqno,
                     last_frame.commit_ts,
@@ -394,7 +394,7 @@ class SqliteDatabase(Database):
             out: list[Boot] = []
             for row in cursor.fetchall():
                 first_record = CANFrameRecordCommitted(
-                    ts_boot_us=int(row[1]),
+                    hw_ts_us=int(row[1]),
                     boot_id=int(row[2]),
                     seqno=int(row[3]),
                     commit_ts=int(row[4]),
@@ -404,7 +404,7 @@ class SqliteDatabase(Database):
                     ),
                 )
                 last_record = CANFrameRecordCommitted(
-                    ts_boot_us=int(row[7]),
+                    hw_ts_us=int(row[7]),
                     boot_id=int(row[8]),
                     seqno=int(row[9]),
                     commit_ts=int(row[10]),
@@ -458,7 +458,7 @@ class SqliteDatabase(Database):
             for boot_id_chunk in _chunked(unique_boot_ids, self._SQL_VARIABLE_CHUNK):
                 placeholders = ",".join("?" for _ in boot_id_chunk)
                 query = (
-                    "SELECT ts_boot_us, boot_id, seqno, commit_ts, can_id_with_flags, data "
+                    "SELECT hw_ts_us, boot_id, seqno, commit_ts, can_id_with_flags, data "
                     "FROM can_frames "
                     f"WHERE device_id=? AND boot_id IN ({placeholders})"
                 )
@@ -476,7 +476,7 @@ class SqliteDatabase(Database):
                 for row in cursor.fetchall():
                     result.append(
                         CANFrameRecordCommitted(
-                            ts_boot_us=int(row[0]),
+                            hw_ts_us=int(row[0]),
                             boot_id=int(row[1]),
                             seqno=int(row[2]),
                             commit_ts=int(row[3]),
@@ -541,7 +541,7 @@ class SqliteDatabase(Database):
                     commit_ts     INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER)),
                     device_uid    INTEGER NOT NULL,
                     device_id     INTEGER NOT NULL,
-                    ts_boot_us    INTEGER NOT NULL,
+                    hw_ts_us      INTEGER NOT NULL,
                     boot_id       INTEGER NOT NULL,
                     seqno         INTEGER NOT NULL,
                     can_id_with_flags INTEGER NOT NULL,
@@ -602,7 +602,7 @@ class SqliteDatabase(Database):
         for seqno_chunk in _chunked(seqno_list, self._SQL_VARIABLE_CHUNK):
             placeholders = ",".join("?" for _ in seqno_chunk)
             query = (
-                "SELECT seqno, device_uid, ts_boot_us, boot_id, can_id_with_flags, data "
+                "SELECT seqno, device_uid, hw_ts_us, boot_id, can_id_with_flags, data "
                 "FROM can_frames "
                 f"WHERE device_id=? AND seqno IN ({placeholders})"
             )
@@ -610,7 +610,7 @@ class SqliteDatabase(Database):
             for row in cursor.fetchall():
                 result[int(row[0])] = _StoredFrameRow(
                     device_uid=int(row[1]),
-                    ts_boot_us=int(row[2]),
+                    hw_ts_us=int(row[2]),
                     boot_id=int(row[3]),
                     can_id_with_flags=int(row[4]),
                     data=bytes(row[5]),
@@ -622,7 +622,7 @@ class SqliteDatabase(Database):
     def _record_matches_row(device_uid: int, record: CANFrameRecord, row: _StoredFrameRow) -> bool:
         return (
             row.device_uid == device_uid
-            and row.ts_boot_us == record.ts_boot_us
+            and row.hw_ts_us == record.hw_ts_us
             and row.boot_id == record.boot_id
             and row.can_id_with_flags == record.frame.can_id_with_flags
             and row.data == bytes(record.frame.data)
@@ -661,12 +661,12 @@ def _make_record(
     seqno: int,
     *,
     boot_id: int = 1,
-    ts_boot_us: int | None = None,
+    hw_ts_us: int | None = None,
     can_id_with_flags: int = 0x123,
     data: bytes = b"\xaa",
 ) -> CANFrameRecord:
     return CANFrameRecord(
-        ts_boot_us=seqno if ts_boot_us is None else ts_boot_us,
+        hw_ts_us=seqno if hw_ts_us is None else hw_ts_us,
         boot_id=boot_id,
         seqno=seqno,
         frame=CANFrame(can_id_with_flags=can_id_with_flags, data=data),
@@ -705,8 +705,8 @@ class _DatabaseTests(unittest.TestCase):
         self.assertEqual([1, 2], [record.seqno for record in stored])
 
     def test_duplicate_mismatch_logs_warning_and_keeps_existing(self) -> None:
-        original = _make_record(1, boot_id=10, ts_boot_us=111, can_id_with_flags=0x123, data=b"\x11")
-        conflicting = _make_record(1, boot_id=11, ts_boot_us=222, can_id_with_flags=0x456, data=b"\x22")
+        original = _make_record(1, boot_id=10, hw_ts_us=111, can_id_with_flags=0x123, data=b"\x11")
+        conflicting = _make_record(1, boot_id=11, hw_ts_us=222, can_id_with_flags=0x456, data=b"\x22")
         self.db.commit(device_uid=42, device="alpha", records=[original])
         with self.assertLogs(__name__, level="WARNING") as captured:
             latest = self.db.commit(device_uid=42, device="alpha", records=[conflicting])
@@ -716,13 +716,13 @@ class _DatabaseTests(unittest.TestCase):
         stored = list(self.db.get_records("alpha", [10, 11], None, None))
         self.assertEqual(1, len(stored))
         self.assertEqual(10, stored[0].boot_id)
-        self.assertEqual(111, stored[0].ts_boot_us)
+        self.assertEqual(111, stored[0].hw_ts_us)
         self.assertEqual(0x123, stored[0].frame.can_id)
         self.assertEqual(b"\x11", bytes(stored[0].frame.data))
 
     def test_commit_preserves_can_id_with_flags_on_round_trip(self) -> None:
         flagged_id = 0xE0000012
-        expected = _make_record(1, boot_id=10, ts_boot_us=111, can_id_with_flags=flagged_id, data=b"\x11")
+        expected = _make_record(1, boot_id=10, hw_ts_us=111, can_id_with_flags=flagged_id, data=b"\x11")
         self.db.commit(device_uid=42, device="alpha", records=[expected])
         stored = list(self.db.get_records("alpha", [10], None, None))
         self.assertEqual(1, len(stored))
@@ -780,10 +780,10 @@ class _DatabaseTests(unittest.TestCase):
 
     def test_get_boots_uses_overlap_time_window(self) -> None:
         records = [
-            _make_record(1, boot_id=100, ts_boot_us=10, data=b"\x01"),
-            _make_record(2, boot_id=100, ts_boot_us=20, data=b"\x02"),
-            _make_record(10, boot_id=200, ts_boot_us=30, data=b"\x03"),
-            _make_record(11, boot_id=200, ts_boot_us=40, data=b"\x04"),
+            _make_record(1, boot_id=100, hw_ts_us=10, data=b"\x01"),
+            _make_record(2, boot_id=100, hw_ts_us=20, data=b"\x02"),
+            _make_record(10, boot_id=200, hw_ts_us=30, data=b"\x03"),
+            _make_record(11, boot_id=200, hw_ts_us=40, data=b"\x04"),
         ]
         self.db.commit(device_uid=1, device="alpha", records=records)
 
@@ -878,7 +878,7 @@ class _DatabaseTests(unittest.TestCase):
     def test_commit_logs_uid_change_and_duplicate_seqnos_in_same_payload(self) -> None:
         self.db.commit(device_uid=100, device="alpha", records=[_make_record(1)])
 
-        duplicate = _make_record(2, boot_id=1, ts_boot_us=22, can_id_with_flags=0x123, data=b"\x22")
+        duplicate = _make_record(2, boot_id=1, hw_ts_us=22, can_id_with_flags=0x123, data=b"\x22")
         with self.assertLogs(__name__, level="WARNING") as captured:
             latest = self.db.commit(device_uid=101, device="alpha", records=[duplicate, duplicate])
         self.assertEqual(2, latest)

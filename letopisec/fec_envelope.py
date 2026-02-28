@@ -80,7 +80,7 @@ def unbox(record: bytes) -> bytes | UnboxError:
         return UnboxError.RS_DECODE_FAILED
 
     user = bytes(codeword[:USER_DATA_BYTES])
-    stored_crc = int.from_bytes(codeword[USER_DATA_BYTES:USER_DATA_BYTES + 4], "little")
+    stored_crc = int.from_bytes(codeword[USER_DATA_BYTES : USER_DATA_BYTES + 4], "little")
     calc_crc = _crc32_ieee(user)
     if calc_crc != stored_crc:
         return UnboxError.CRC_MISMATCH
@@ -363,7 +363,7 @@ class _FECEnvelopeTests(unittest.TestCase):
                 self.assertIsInstance(
                     result,
                     bytes,
-                    msg=f"decode failed for damaged={damaged} payload_len={payload_len} err={result}",
+                    msg=f"decode failed for damaged={damaged} payload_len={payload_len} err={result!r}",
                 )
                 self.assertEqual(expected, result)
 

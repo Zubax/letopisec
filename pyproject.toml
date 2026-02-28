@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "letopisec"
+dynamic = ["version"]
+description = "Log upload server for Zubax CANFace CF3D"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+]
+authors = [
+    { name = "Zubax Robotics", email = "accelerationism@zubax.com" },
+]
+
+[tool.setuptools]
+packages = ["letopisec"]
+
+[tool.setuptools.dynamic]
+version = { attr = "letopisec.__version__" }
+
+[tool.black]
+line-length = 120

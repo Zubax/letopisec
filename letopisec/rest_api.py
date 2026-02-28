@@ -64,7 +64,6 @@ class RecordsFilterEcho(BaseModel):
     boot_ids: list[int]
     seqno_min: int | None
     seqno_max: int | None
-    after_seqno: int | None
     wait_timeout_s: int
     limit: int
     offset: int
@@ -362,15 +361,6 @@ def get_boots(
     return BootsResponse(device_tag=device_tag, boots=serialized)
 
 
-def _resolve_effective_seqno_min(seqno_min: int | None, after_seqno: int | None) -> int | None:
-    if after_seqno is None:
-        return seqno_min
-    cursor_min = after_seqno + 1
-    if seqno_min is None:
-        return cursor_min
-    return max(seqno_min, cursor_min)
-
-
 def _query_records_once(
     database: Database,
     device_tag: str,
@@ -393,7 +383,8 @@ def _query_records_once(
     summary="Query CAN records",
     description=(
         "Returns records for specified device tag and boot IDs. "
-        "Optional long polling is enabled via wait_timeout_s + after_seqno to wait for new records."
+        "Optional long polling is enabled via wait_timeout_s. "
+        "For new-since behavior, set seqno_min to last_seen_seqno + 1."
     ),
     responses={
         200: {
@@ -406,7 +397,6 @@ def _query_records_once(
                             "boot_ids": [1],
                             "seqno_min": 10,
                             "seqno_max": None,
-                            "after_seqno": 9,
                             "wait_timeout_s": 0,
                             "limit": 1000,
                             "offset": 0,
@@ -435,9 +425,6 @@ async def get_records(
     boot_id: Annotated[list[int], Query(min_length=1, description="Repeated boot_id parameter")],
     seqno_min: Annotated[int | None, Query(description="Inclusive minimum sequence number")] = None,
     seqno_max: Annotated[int | None, Query(description="Inclusive maximum sequence number")] = None,
-    after_seqno: Annotated[
-        int | None, Query(description="Return records with seqno strictly greater than this")
-    ] = None,
     wait_timeout_s: Annotated[
         int,
         Query(ge=0, le=WAIT_MAX_TIMEOUT_S, description="Optional long-poll timeout in seconds"),
@@ -447,34 +434,31 @@ async def get_records(
     database: Database = Depends(get_database),
 ) -> RecordsResponse:
     boot_ids = sorted(set(int(value) for value in boot_id))
-    effective_seqno_min = _resolve_effective_seqno_min(seqno_min, after_seqno)
     filters = RecordsFilterEcho(
         boot_ids=boot_ids,
-        seqno_min=effective_seqno_min,
+        seqno_min=seqno_min,
         seqno_max=seqno_max,
-        after_seqno=after_seqno,
         wait_timeout_s=wait_timeout_s,
         limit=limit,
         offset=offset,
     )
     LOGGER.debug(
-        "Records query request: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r after_seqno=%r "
-        "wait_timeout_s=%d limit=%d offset=%d",
+        "Records query request: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r wait_timeout_s=%d "
+        "limit=%d offset=%d",
         device_tag,
         boot_ids,
-        effective_seqno_min,
+        seqno_min,
         seqno_max,
-        after_seqno,
         wait_timeout_s,
         limit,
         offset,
     )
 
-    if seqno_max is not None and effective_seqno_min is not None and effective_seqno_min > seqno_max:
+    if seqno_max is not None and seqno_min is not None and seqno_min > seqno_max:
         LOGGER.warning(
             "Records query has invalid effective range; returning empty: device_tag=%r seqno_min=%d seqno_max=%d",
             device_tag,
-            effective_seqno_min,
+            seqno_min,
             seqno_max,
         )
         return RecordsResponse(
@@ -497,7 +481,7 @@ async def get_records(
                 database=database,
                 device_tag=device_tag,
                 boot_ids=boot_ids,
-                seqno_min=effective_seqno_min,
+                seqno_min=seqno_min,
                 seqno_max=seqno_max,
             )
             total_matched = len(matching_records)
@@ -566,7 +550,7 @@ async def get_records(
             "Unexpected exception while querying records: device_tag=%r boot_ids=%s seqno_min=%r seqno_max=%r",
             device_tag,
             boot_ids,
-            effective_seqno_min,
+            seqno_min,
             seqno_max,
             exc_info=True,
         )
@@ -1083,7 +1067,7 @@ class _RestAPITests(unittest.TestCase):
         self.assertEqual([], body["records"])
         self.assertFalse(body["timed_out"])
 
-    def test_get_records_after_seqno_filters_results(self) -> None:
+    def test_get_records_seqno_min_filters_results(self) -> None:
         self.database.records_by_tag["alpha"] = [
             self._make_record(seqno=1, boot_id=1),
             self._make_record(seqno=2, boot_id=1),
@@ -1091,7 +1075,7 @@ class _RestAPITests(unittest.TestCase):
         ]
         response = self.client.get(
             "/cf3d/api/v1/records",
-            params={"device_tag": "alpha", "boot_id": 1, "after_seqno": 2},
+            params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 3},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1105,7 +1089,7 @@ class _RestAPITests(unittest.TestCase):
         with patch("letopisec.rest_api.WAIT_POLL_INTERVAL_S", 0.01):
             response = self.client.get(
                 "/cf3d/api/v1/records",
-                params={"device_tag": "alpha", "boot_id": 1, "after_seqno": 8, "wait_timeout_s": 1},
+                params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 9, "wait_timeout_s": 1},
             )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -1119,7 +1103,7 @@ class _RestAPITests(unittest.TestCase):
         with patch("letopisec.rest_api.WAIT_POLL_INTERVAL_S", 0.01):
             response = self.client.get(
                 "/cf3d/api/v1/records",
-                params={"device_tag": "alpha", "boot_id": 1, "after_seqno": 100, "wait_timeout_s": 1},
+                params={"device_tag": "alpha", "boot_id": 1, "seqno_min": 101, "wait_timeout_s": 1},
             )
         self.assertEqual(200, response.status_code)
         body = response.json()

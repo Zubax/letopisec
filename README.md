@@ -1,8 +1,24 @@
-# Letopisec -- Data collection server for CANFace CF3D
+<div align="center">
 
-For details, please refer to the [requirements document](https://forum.zubax.com/t/cf3d-doordash-datalogger-functional-requirements/2802).
+<img src="https://zubax.com/static/assets/logos/zubax-logo-modern.svg" width="90px">
 
-This is the server part: a Python REST service invoked by CF3D data loggers when the server is reachable. Uploaded CAN frames are stored in SQLite.
+<h1>Letopisec</h1>
+
+_Data collection server for CF3D CAN black box recorders_
+
+[![CI](https://github.com/Zubax/letopisec/actions/workflows/ci.yml/badge.svg)](https://github.com/Zubax/letopisec/actions/workflows/ci.yml)
+[![Website](https://img.shields.io/badge/website-zubax.com-black?color=e00000)](https://zubax.com/)
+[![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=e00000)](https://forum.zubax.com)
+
+</div>
+
+Zubax CANFace CF3D CAN bus data loggers collect CAN frames into on-device persistent storage, like a black box flight recorder, and store them until wireless connectivity to a predefined network becomes available (e.g., during vehicle service or maintenance). As soon as connectivity is available, the CAN frames collected during the offline period are uploaded in FIFO order to the data collection server. Every frame that is confirmed to be received by the server is erased from the device, enabling completely unattended continuous persistent data collection across the entire fleet of vehicles. The on-board storage is large enough to store at least multiple days or weeks worth of data with highly robust FEC encoding to avoid loss or damage.
+
+This project implements the data collection server of this system. It is a simple Python application that exposes a REST API that is used by dataloggers to upload data when within reach of the wireless network, and by clients to review and fetch stored data of interest (with rich filters). This system enables advanced diagnostics, postmortem analysis, predictive maintenance, and data mining at scale across the entire fleet, without the need to manually collect data per vehicle, as long as each vehicle appears within the range of a predefined wireless network at least intermittently.
+
+The server can be deployed in airgapped networks, ensuring 100% locality and security of the collected datasets. Ingest scripts are available to bulk upload data from datalogger memory cards directly in case of damage (e.g., following accidents where the vehicle is damaged or destroyed). The data is stored in a simple SQLite database that can also be accessed directly for more advanced usage.
+
+For details, please reach out to <sales@zubax.com>.
 
 ## Usage
 
@@ -12,7 +28,7 @@ Install from this directory:
 pip install .  # optionally use -e . for editable installation
 ```
 
-Run the server:
+Run the server at the default endpoint <http://0.0.0.0:8000>:
 
 ```bash
 letopisec serve  # See --help for extra info.
@@ -47,10 +63,15 @@ uvicorn --factory letopisec.server:create_app_from_env
 
 ## API endpoints
 
-- `POST /cf3d/api/v1/commit` - Upload one or more binary CF3D records; the first HTTP response line is the cumulative ACK (`last_seqno`).
-- `GET /cf3d/api/v1/devices` - List known devices with their latest heartbeat time (`last_heard_ts`) and last seen hardware UID (`last_uid`).
-- `GET /cf3d/api/v1/boots` - List boot sessions for a device, including first/last record per boot, with optional commit-time window filtering.
-- `GET /cf3d/api/v1/records` - Fetch records for a device and one or more boot IDs, with optional seqno bounds and long-polling for real-time streaming.
+`POST /cf3d/api/v1/commit` - Upload one or more binary CF3D records; the first HTTP response line is the cumulative ACK (`last_seqno`).
+This is the endpoint that is invoked by dataloggers to transfer previously recorded CAN frames from their internal storage.
+
+`GET /cf3d/api/v1/devices` - List known devices with their latest heartbeat time (`last_heard_ts`) and last seen hardware UID (`last_uid`).
+Use this to see which dataloggers have committed their data and when each was last seen online.
+
+`GET /cf3d/api/v1/boots` - List boot sessions for a device, including first/last record per boot, with optional commit-time window filtering.
+
+`GET /cf3d/api/v1/records` - Fetch records for a device and one or more boot IDs, with optional seqno bounds and long-polling for real-time streaming.
 
 ### Manual invocation
 

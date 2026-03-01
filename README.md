@@ -22,16 +22,11 @@ For details, please reach out to <sales@zubax.com>.
 
 ## Usage
 
-Install from this directory:
+Install and run the server at the default endpoint <http://0.0.0.0:8000>
 
 ```bash
-pip install .  # optionally use -e . for editable installation
-```
-
-Run the server at the default endpoint <http://0.0.0.0:8000>:
-
-```bash
-letopisec serve  # See --help for extra info.
+pip install letopisec   # For development, use `pip install -e .` for editable installation
+letopisec serve         # See --help for extra info.
 ```
 
 Open the API docs at the `/docs` endpoint in your browser, e.g., <http://localhost:8000/docs>.

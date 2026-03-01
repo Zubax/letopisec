@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag, Publish, and Release
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'master'
+      }}
+    steps:
+      - name: Check out successful commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Preflight release checks
+        id: preflight
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          echo "INFO: Release preflight started"
+          echo "INFO: workflow_run.head_sha=${HEAD_SHA}"
+
+          git fetch --force --tags origin master
+          current_master_sha="$(git rev-parse origin/master)"
+          echo "INFO: origin/master=${current_master_sha}"
+
+          if [ "${HEAD_SHA}" != "${current_master_sha}" ]; then
+            echo "WARNING: workflow_run commit is stale; master moved ahead"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            echo "skip_reason=stale_master_head" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          version="$(python - <<'PY'
+          from letopisec import __version__
+          print(__version__)
+          PY
+          )"
+          version="$(printf '%s' "${version}" | tr -d '\n\r')"
+          if [ -z "${version}" ]; then
+            echo "ERROR: __version__ is empty"
+            exit 1
+          fi
+          echo "INFO: discovered version=${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+          if git ls-remote --exit-code --tags --refs origin "refs/tags/${version}" >/dev/null 2>&1; then
+            echo "INFO: tag ${version} already exists; skipping release"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            echo "skip_reason=tag_exists" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "INFO: tag ${version} is new; release is allowed"
+          echo "should_release=true" >> "${GITHUB_OUTPUT}"
+          echo "skip_reason=none" >> "${GITHUB_OUTPUT}"
+
+      - name: Emit preflight decision
+        run: |
+          echo "INFO: should_release=${{ steps.preflight.outputs.should_release }}"
+          echo "INFO: skip_reason=${{ steps.preflight.outputs.skip_reason }}"
+          echo "INFO: version=${{ steps.preflight.outputs.version }}"
+
+      - name: Create and push tag
+        id: tag_push
+        if: ${{ steps.preflight.outputs.should_release == 'true' }}
+        env:
+          VERSION: ${{ steps.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "INFO: Creating tag ${VERSION}"
+
+          git fetch --force --tags origin
+
+          if git ls-remote --exit-code --tags --refs origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "WARNING: tag ${VERSION} appeared before push; skipping publish"
+            echo "tag_exists=true" >> "${GITHUB_OUTPUT}"
+            echo "tag_pushed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag "${VERSION}"
+
+          if push_output="$(git push origin "refs/tags/${VERSION}:refs/tags/${VERSION}" 2>&1)"; then
+            echo "${push_output}"
+            echo "INFO: tag ${VERSION} pushed"
+            echo "tag_exists=false" >> "${GITHUB_OUTPUT}"
+            echo "tag_pushed=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "${push_output}"
+          if printf '%s' "${push_output}" | grep -qiE "already exists|reference already exists|cannot lock ref|updates were rejected"; then
+            echo "WARNING: tag ${VERSION} already exists remotely; skipping publish"
+            echo "tag_exists=true" >> "${GITHUB_OUTPUT}"
+            echo "tag_pushed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "ERROR: failed to push tag ${VERSION}"
+          exit 1
+
+      - name: Install build tooling
+        if: ${{ steps.preflight.outputs.should_release == 'true' && steps.tag_push.outputs.tag_exists != 'true' }}
+        run: python -m pip install --upgrade pip build
+
+      - name: Build distributions
+        if: ${{ steps.preflight.outputs.should_release == 'true' && steps.tag_push.outputs.tag_exists != 'true' }}
+        run: python -m build
+
+      - name: Publish package to PyPI
+        if: ${{ steps.preflight.outputs.should_release == 'true' && steps.tag_push.outputs.tag_exists != 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Create GitHub release
+        if: ${{ steps.preflight.outputs.should_release == 'true' && steps.tag_push.outputs.tag_exists != 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.preflight.outputs.version }}
+          name: ${{ steps.preflight.outputs.version }}
+          generate_release_notes: true

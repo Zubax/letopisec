@@ -18,6 +18,43 @@ This project implements the data collection server of this system. It is a simpl
 
 The server can be deployed in airgapped networks, ensuring 100% locality and security of the collected datasets. Ingest scripts are available to bulk upload data from datalogger memory cards directly in case of damage (e.g., following accidents where the vehicle is damaged or destroyed). The data is stored in a simple SQLite database that can also be accessed directly for more advanced usage.
 
+```mermaid
+graph TD
+    CAN["🔌 CAN bus<br/>every frame from every ECU"] --> CF3D
+
+    subgraph FLEET["✈️ 🚗 🚢 Vehicles"]
+        CF3D["CF3D Black Box Recorder<br/><i>on-device storage<br/>weeks of data</i>"]
+    end
+
+    CF3D == "📡 auto-upload over Wi-Fi<br/>during service/maintenance<br/>fully unattended" ==> COMMIT
+
+    subgraph LETOPISEC["💾 Letopisec Server"]
+        COMMIT["Ingest<br/>FEC repair records"] --> DB[("SQLite<br/>append-only · idempotent<br/>airgap-safe")]
+        DB --> API["REST API<br/>devices · boots · records<br/>filtering · long-polling"]
+    end
+
+    COMMIT -. "☑️ ACK<br/>device erases confirmed records" .-> CF3D
+
+    API ==> D["Diagnostics"]
+    API ==> P["Postmortem<br/>Analysis"]
+    API ==> M["Predictive<br/>Maintenance"]
+    API ==> F["Fleet-Scale<br/>Data Mining"]
+
+    classDef can fill:#e2e8f0,stroke:#475569,color:#1e293b
+    classDef recorder fill:#880000,stroke:#FF0000,color:#fff,font-weight:bold
+    classDef ingest fill:#d1fae5,stroke:#059669,color:#064e3b
+    classDef db fill:#059669,stroke:#047857,color:#fff,font-weight:bold
+    classDef api fill:#d1fae5,stroke:#059669,color:#064e3b
+    classDef outcome fill:#fef08a,stroke:#ca8a04,color:#713f12,font-weight:bold
+
+    class CAN can
+    class CF3D recorder
+    class COMMIT ingest
+    class DB db
+    class API api
+    class D,P,M,F outcome
+```
+
 For details, please reach out to <sales@zubax.com>.
 
 ## Usage

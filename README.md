@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://zubax.com/static/assets/logos/zubax-logo-modern.svg" width="90px">
+<img src="https://zubax.com/static/assets/logos/zubax-logo-modern.svg" width="130px">
 
 <h1>Letopisec</h1>
 

@@ -64,7 +64,7 @@ For details, please reach out to <sales@zubax.com>.
 Install and run the server at the default endpoint <http://0.0.0.0:8000>
 
 ```bash
-pip install nestor   # For development, use `pip install -e .` for editable installation
+pip install zubax-nestor   # For development, use `pip install -e .` for editable installation
 nestor serve         # See --help for extra info.
 ```
 

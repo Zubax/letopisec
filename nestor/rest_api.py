@@ -1125,6 +1125,19 @@ class _RestAPITests(unittest.TestCase):
                 committed_uids.append(self.database.commits[-1][0])
         self.assertEqual([16, 16, 16, 16], committed_uids)
 
+    def test_commit_device_uid_overflow_returns_500(self) -> None:
+        with _import_test_client_class()(create_app(SqliteDatabase())) as local_client:
+            response = local_client.post(
+                "/cf3d/api/v1/commit",
+                params={
+                    "device_uid": "15077748194817838259",
+                    "device": "uid-overflow-test-device",
+                },
+                content=b"",
+            )
+        self.assertEqual(500, response.status_code)
+        self.assertEqual({"detail": "internal server error"}, response.json())
+
     def test_missing_device_uid_is_rejected(self) -> None:
         response = self.client.post("/cf3d/api/v1/commit", params={"device": "abc"})
         self.assertEqual(422, response.status_code)

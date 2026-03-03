@@ -4,10 +4,6 @@
 
 <h1>Nestor</h1>
 
-<img src="data/Нестор-летописец.jpg" width="210px" alt="Nestor">
-
-[Nestor The Chronicler](https://en.wikipedia.org/wiki/Nestor_the_Chronicler)
-
 _Data collection server for CF3D CAN black box recorders_
 
 [![CI](https://github.com/Zubax/nestor/actions/workflows/ci.yml/badge.svg)](https://github.com/Zubax/nestor/actions/workflows/ci.yml)
@@ -15,6 +11,8 @@ _Data collection server for CF3D CAN black box recorders_
 [![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=e00000)](https://forum.zubax.com)
 
 </div>
+
+---
 
 Zubax CANFace CF3D CAN bus data loggers collect CAN frames into on-device persistent storage, like a black box flight recorder, and store them until wireless connectivity to a predefined network becomes available (e.g., during vehicle service or maintenance). As soon as connectivity is available, the CAN frames collected during the offline period are uploaded in FIFO order to the data collection server. Every frame that is confirmed to be received by the server is erased from the device, enabling completely unattended continuous persistent data collection across the entire fleet of vehicles. The on-board storage is large enough to store at least multiple days or weeks worth of data with highly robust FEC encoding to avoid loss or damage.
 
@@ -124,3 +122,11 @@ wget -qO- "http://localhost:8000/cf3d/api/v1/boots?device=my+device" | jq
 ```bash
 wget -qO- "http://localhost:8000/cf3d/api/v1/records?device=my+device&boot_id=1" | jq
 ```
+
+## Historical trivia
+
+See [Nestor The Chronicler](https://en.wikipedia.org/wiki/Nestor_the_Chronicler).
+
+<p align="center">
+<img src="data/Нестор-летописец.jpg" width="300" alt="Nestor the Chronicler">
+</p>

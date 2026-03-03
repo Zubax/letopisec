@@ -7,6 +7,7 @@
 _Data collection server for CF3D CAN black box recorders_
 
 [![CI](https://github.com/Zubax/nestor/actions/workflows/ci.yml/badge.svg)](https://github.com/Zubax/nestor/actions/workflows/ci.yml)
+![PyPI - Version](https://img.shields.io/pypi/v/zubax-nestor)
 [![Website](https://img.shields.io/badge/website-zubax.com-black?color=e00000)](https://zubax.com/)
 [![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=e00000)](https://forum.zubax.com)
 
@@ -64,8 +65,8 @@ For details, please reach out to <sales@zubax.com>.
 Install and run the server at the default endpoint <http://0.0.0.0:8000>
 
 ```bash
-pip install zubax-nestor   # For development, use `pip install -e .` for editable installation
-nestor serve         # See --help for extra info.
+pip install zubax-nestor # For development, use `pip install -e .` for editable installation
+nestor serve             # See --help for extra info.
 ```
 
 Open the API docs at the `/docs` endpoint in your browser, e.g., <http://localhost:8000/docs>.
